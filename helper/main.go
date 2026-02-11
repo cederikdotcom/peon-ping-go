@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -409,6 +410,13 @@ func dismissAllNotifications() int {
 // --- Notification popup via Win32 ---
 
 func showNotification(title, msg, icon string, _ uintptr) {
+	// Watchdog: force-exit if the Win32 message loop hangs for any reason
+	// (e.g. SetTimer fails silently, message loop deadlocks).
+	go func() {
+		time.Sleep(6 * time.Second)
+		os.Exit(0)
+	}()
+
 	notifyTitle = title
 	notifyMessage = msg
 	activeIcon = icon
