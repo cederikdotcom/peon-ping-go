@@ -7,6 +7,9 @@ import (
 	"os/exec"
 )
 
+// captureWindowHandle is a no-op on macOS (window targeting not needed).
+func captureWindowHandle() uint64 { return 0 }
+
 // playSound plays a WAV file via afplay (macOS).
 // Fire-and-forget.
 func playSound(file string, volume float64) {
@@ -15,8 +18,8 @@ func playSound(file string, volume float64) {
 }
 
 // sendNotification shows a macOS notification via osascript.
-// Fire-and-forget.
-func sendNotification(msg, title, color string) {
+// Fire-and-forget. hwnd is ignored on macOS.
+func sendNotification(title, msg, icon string, hwnd uint64) {
 	script := fmt.Sprintf(`display notification %q with title %q`, msg, title)
 	cmd := exec.Command("osascript", "-e", script)
 	cmd.Start()
@@ -24,7 +27,7 @@ func sendNotification(msg, title, color string) {
 
 // playSoundAndNotify plays sound and sends notification separately on macOS
 // (no benefit to combining since afplay and osascript are both fast).
-func playSoundAndNotify(file string, volume float64, msg, title, color string) {
+func playSoundAndNotify(file string, volume float64, title, msg, icon string, hwnd uint64) {
 	playSound(file, volume)
-	sendNotification(msg, title, color)
+	sendNotification(title, msg, icon, hwnd)
 }

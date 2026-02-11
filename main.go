@@ -79,10 +79,31 @@ func main() {
 
 	// Session start extras.
 	if event.Type == "session_start" {
+		// Capture the terminal window handle for popup targeting.
+		if event.SessionID != "" {
+			hwnd := captureWindowHandle()
+			if hwnd != 0 {
+				if ls.State.WindowHandles == nil {
+					ls.State.WindowHandles = make(map[string]uint64)
+				}
+				ls.State.WindowHandles[event.SessionID] = hwnd
+			}
+		}
 		checkForUpdate(peonDir)
 		showUpdateNotice(peonDir)
 		if paused {
 			fmt.Fprintf(os.Stderr, "peon-ping: sounds paused — run 'peon --resume' or '/peon-ping-toggle' to unpause\n")
+		}
+	}
+
+	// Look up the saved window handle for this session, fall back to default.
+	var targetHwnd uint64
+	if ls.State.WindowHandles != nil {
+		if event.SessionID != "" {
+			targetHwnd = ls.State.WindowHandles[event.SessionID]
+		}
+		if targetHwnd == 0 {
+			targetHwnd = ls.State.WindowHandles["_default"]
 		}
 	}
 
@@ -125,20 +146,12 @@ func main() {
 
 	// Play sound and/or notify.
 	if !paused {
-		notifyMsg := ""
-		if route.Notify {
-			notifyMsg = fmt.Sprintf("%s  —  %s", project, route.NotifyMsg)
-		}
-
-		tabTitle := fmt.Sprintf("%s%s: %s", route.Marker, project, route.Status)
-
 		if soundFile != "" && fileExists(soundFile) && route.Notify {
-			// Combined sound + notification in one powershell call.
-			playSoundAndNotify(soundFile, cfg.Volume, notifyMsg, tabTitle, route.NotifyColor)
+			playSoundAndNotify(soundFile, cfg.Volume, project, route.NotifyMsg, route.NotifyIcon, targetHwnd)
 		} else if soundFile != "" && fileExists(soundFile) {
 			playSound(soundFile, cfg.Volume)
 		} else if route.Notify {
-			sendNotification(notifyMsg, tabTitle, route.NotifyColor)
+			sendNotification(project, route.NotifyMsg, route.NotifyIcon, targetHwnd)
 		}
 	}
 

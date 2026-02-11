@@ -14,7 +14,7 @@ type Route struct {
 	Status      string // tab title status text
 	Marker      string // prefix for tab title (e.g. "● ")
 	Notify      bool   // whether to send a desktop notification
-	NotifyColor string // "red", "blue", "yellow"
+	NotifyIcon string // "permission", "complete", "idle"
 	NotifyMsg   string // notification body (project name is prepended by caller)
 }
 
@@ -37,7 +37,7 @@ func routeEvent(e Event) Route {
 			Status:      "done",
 			Marker:      "● ",
 			Notify:      true,
-			NotifyColor: "blue",
+			NotifyIcon: "complete",
 			NotifyMsg:   "Task complete",
 		}
 	case "permission_needed":
@@ -46,7 +46,7 @@ func routeEvent(e Event) Route {
 			Status:      "needs approval",
 			Marker:      "● ",
 			Notify:      true,
-			NotifyColor: "red",
+			NotifyIcon: "permission",
 			NotifyMsg:   "Permission needed",
 		}
 	case "idle":
@@ -54,7 +54,7 @@ func routeEvent(e Event) Route {
 			Status:      "done",
 			Marker:      "● ",
 			Notify:      true,
-			NotifyColor: "yellow",
+			NotifyIcon: "idle",
 			NotifyMsg:   "Waiting for input",
 		}
 	default:

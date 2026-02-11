@@ -137,19 +137,46 @@ func runCLI(peonDir string, args []string) {
 		fmt.Printf("peon-ping: switched to %s (%s)\n", target, display)
 		os.Exit(0)
 
+	case "--register":
+		// Register the current terminal window for popup targeting.
+		// Usage: peon --register [session_id]
+		// Without session_id, saves as the default fallback window.
+		hwnd := captureWindowHandle()
+		if hwnd == 0 {
+			fmt.Fprintln(os.Stderr, "peon-ping: could not capture window handle")
+			os.Exit(1)
+		}
+		ls, err := loadStateLocked(peonDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if ls.State.WindowHandles == nil {
+			ls.State.WindowHandles = make(map[string]uint64)
+		}
+		sessionID := "_default"
+		if len(args) > 1 {
+			sessionID = args[1]
+		}
+		ls.State.WindowHandles[sessionID] = hwnd
+		ls.saveStateUnlock(peonDir)
+		fmt.Printf("peon-ping: registered window %d for session %s\n", hwnd, sessionID)
+		os.Exit(0)
+
 	case "--help", "-h":
 		fmt.Print(`Usage: peon <command>
 
 Commands:
-  --pause        Mute sounds
-  --resume       Unmute sounds
-  --toggle       Toggle mute on/off
-  --status       Check if paused or active
-  --packs        List available sound packs
-  --pack <name>  Switch to a specific pack
-  --pack         Cycle to the next pack
-  --version      Show version
-  --help         Show this help
+  --pause           Mute sounds
+  --resume          Unmute sounds
+  --toggle          Toggle mute on/off
+  --status          Check if paused or active
+  --packs           List available sound packs
+  --pack <name>     Switch to a specific pack
+  --pack            Cycle to the next pack
+  --register <sid>  Register terminal window for session
+  --version         Show version
+  --help            Show this help
 `)
 		os.Exit(0)
 

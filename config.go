@@ -19,9 +19,10 @@ type Config struct {
 
 // State represents .state.json (runtime state).
 type State struct {
-	LastPlayed       map[string]string `json:"last_played"`
-	PromptTimestamps []float64         `json:"prompt_timestamps"`
-	AgentSessions    []string          `json:"agent_sessions,omitempty"`
+	LastPlayed       map[string]string  `json:"last_played"`
+	PromptTimestamps []float64          `json:"prompt_timestamps"`
+	AgentSessions    []string           `json:"agent_sessions,omitempty"`
+	WindowHandles    map[string]uint64  `json:"window_handles,omitempty"`
 }
 
 // lockedState holds the state plus the open file handle for flock.

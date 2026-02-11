@@ -3,6 +3,7 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"strconv"
@@ -10,30 +11,45 @@ import (
 	"unsafe"
 )
 
+// Embedded icons for each notification state
+//
+//go:embed icon_complete.png
+var iconComplete []byte
+
+//go:embed icon_permission.png
+var iconPermission []byte
+
+//go:embed icon_idle.png
+var iconIdle []byte
+
 // DLL handles
 var (
-	winmm    = syscall.NewLazyDLL("winmm.dll")
-	user32   = syscall.NewLazyDLL("user32.dll")
-	gdi32    = syscall.NewLazyDLL("gdi32.dll")
-	kernel32 = syscall.NewLazyDLL("kernel32.dll")
+	winmm      = syscall.NewLazyDLL("winmm.dll")
+	user32     = syscall.NewLazyDLL("user32.dll")
+	gdi32      = syscall.NewLazyDLL("gdi32.dll")
+	kernel32   = syscall.NewLazyDLL("kernel32.dll")
+	gdiplus    = syscall.NewLazyDLL("gdiplus.dll")
+	shlwapiDLL = syscall.NewLazyDLL("shlwapi.dll")
 
 	// Sound
 	mciSendStringW = winmm.NewProc("mciSendStringW")
 
 	// Window management
-	registerClassExW     = user32.NewProc("RegisterClassExW")
-	createWindowExW      = user32.NewProc("CreateWindowExW")
-	showWindowProc       = user32.NewProc("ShowWindow")
-	defWindowProcW       = user32.NewProc("DefWindowProcW")
-	getMessageW          = user32.NewProc("GetMessageW")
-	translateMessage     = user32.NewProc("TranslateMessage")
-	dispatchMessageW     = user32.NewProc("DispatchMessageW")
-	postQuitMessage      = user32.NewProc("PostQuitMessage")
-	destroyWindowProc    = user32.NewProc("DestroyWindow")
-	setTimerProc         = user32.NewProc("SetTimer")
-	enumDisplayMonitors  = user32.NewProc("EnumDisplayMonitors")
-	getMonitorInfoW      = user32.NewProc("GetMonitorInfoW")
-	getModuleHandleW     = kernel32.NewProc("GetModuleHandleW")
+	registerClassExW    = user32.NewProc("RegisterClassExW")
+	createWindowExW     = user32.NewProc("CreateWindowExW")
+	defWindowProcW      = user32.NewProc("DefWindowProcW")
+	getMessageW         = user32.NewProc("GetMessageW")
+	translateMessage    = user32.NewProc("TranslateMessage")
+	dispatchMessageW    = user32.NewProc("DispatchMessageW")
+	postQuitMessage     = user32.NewProc("PostQuitMessage")
+	destroyWindowProc   = user32.NewProc("DestroyWindow")
+	setTimerProc        = user32.NewProc("SetTimer")
+	getForegroundWindow = user32.NewProc("GetForegroundWindow")
+	getWindowRect       = user32.NewProc("GetWindowRect")
+	getModuleHandleW    = kernel32.NewProc("GetModuleHandleW")
+
+	// DPI
+	setProcessDPIAware = user32.NewProc("SetProcessDPIAware")
 
 	// Painting
 	beginPaintProc   = user32.NewProc("BeginPaint")
@@ -46,6 +62,22 @@ var (
 	createFontW      = gdi32.NewProc("CreateFontW")
 	selectObjectProc = gdi32.NewProc("SelectObject")
 	deleteObjectProc = gdi32.NewProc("DeleteObject")
+	createPenProc    = gdi32.NewProc("CreatePen")
+	moveToExProc     = gdi32.NewProc("MoveToEx")
+	lineToProc       = gdi32.NewProc("LineTo")
+
+	// GDI+
+	gdiplusStartup             = gdiplus.NewProc("GdiplusStartup")
+	gdiplusShutdown            = gdiplus.NewProc("GdiplusShutdown")
+	gdipCreateBitmapFromStream = gdiplus.NewProc("GdipCreateBitmapFromStream")
+	gdipCreateFromHDC          = gdiplus.NewProc("GdipCreateFromHDC")
+	gdipDeleteGraphics         = gdiplus.NewProc("GdipDeleteGraphics")
+	gdipDrawImageRectI         = gdiplus.NewProc("GdipDrawImageRectI")
+	gdipDisposeImage           = gdiplus.NewProc("GdipDisposeImage")
+	gdipSetInterpolationMode   = gdiplus.NewProc("GdipSetInterpolationMode")
+
+	// COM stream
+	shCreateMemStream = shlwapiDLL.NewProc("SHCreateMemStream")
 )
 
 // Win32 constants
@@ -56,17 +88,26 @@ const (
 	WS_EX_TOOLWINDOW = 0x00000080
 	CS_HREDRAW       = 0x0002
 	CS_VREDRAW       = 0x0001
-	WM_CREATE        = 0x0001
 	WM_DESTROY       = 0x0002
 	WM_PAINT         = 0x000F
 	WM_TIMER         = 0x0113
-	SW_SHOW          = 5
-	DT_CENTER        = 0x0001
 	DT_VCENTER       = 0x0004
-	DT_SINGLELINE   = 0x0020
+	DT_SINGLELINE    = 0x0020
+	DT_LEFT          = 0x0000
 	TRANSPARENT      = 1
 	FW_BOLD          = 700
 	DEFAULT_CHARSET  = 1
+	PS_SOLID         = 0
+)
+
+// WC3 color palette
+const (
+	colorBgDark       = 0x00100A08 // RGB(8, 10, 16) - very dark blue-black
+	colorBorderGold   = 0x001E8CB4 // RGB(180, 140, 30) - bright gold
+	colorBorderShadow = 0x00143250 // RGB(80, 50, 20) - dark gold shadow
+	colorBorderLight  = 0x0030A0D0 // RGB(208, 160, 48) - highlight gold
+	colorTextGold     = 0x0060DCFF // RGB(255, 220, 96) - gold text
+	colorTextWhite    = 0x00F0F0F0 // RGB(240, 240, 240) - white text
 )
 
 // Win32 structs
@@ -107,27 +148,47 @@ type PAINTSTRUCT struct {
 	Reserved  [32]byte
 }
 
-type MONITORINFO struct {
-	Size    uint32
-	Monitor RECT
-	Work    RECT
-	Flags   uint32
+type GdiplusStartupInput struct {
+	GdiplusVersion           uint32
+	DebugEventCallback       uintptr
+	SuppressBackgroundThread int32
+	SuppressExternalCodecs   int32
 }
 
 // Notification state (global for WndProc callback)
 var (
-	notifyBgColor uint32
-	notifyText    string
+	notifyTitle   string
+	notifyMessage string
 	notifyWindows []uintptr
+	gdipImages    map[string]uintptr // icon name -> GDI+ image
+	activeIcon    string             // which icon to show
+	gdipToken     uintptr
+)
+
+// Popup dimensions
+const (
+	popupW    = 420
+	popupH    = 86
+	borderW   = 3
+	iconSize  = 64
+	iconPad   = 11 // (popupH - iconSize) / 2
+	iconFrame = 2
 )
 
 func main() {
+	setProcessDPIAware.Call()
+	initGDIPlus()
+
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: peon-helper.exe <play|notify|both> ...")
+		fmt.Fprintln(os.Stderr, "Usage: peon-helper.exe <play|notify|both|hwnd> ...")
 		os.Exit(1)
 	}
 
 	switch os.Args[1] {
+	case "hwnd":
+		hwnd, _, _ := getForegroundWindow.Call()
+		fmt.Println(hwnd)
+
 	case "play":
 		// play <file> <volume>
 		if len(os.Args) < 4 {
@@ -137,25 +198,108 @@ func main() {
 		playWav(os.Args[2], vol)
 
 	case "notify":
-		// notify <message> <color>
-		if len(os.Args) < 4 {
+		// notify <title> <message> <icon> [hwnd]
+		if len(os.Args) < 5 {
 			os.Exit(1)
 		}
-		showNotification(os.Args[2], os.Args[3])
+		targetHwnd := parseHwndArg(5)
+		showNotification(os.Args[2], os.Args[3], os.Args[4], targetHwnd)
 
 	case "both":
-		// both <file> <volume> <message> <color>
-		if len(os.Args) < 6 {
+		// both <file> <volume> <title> <message> <icon> [hwnd]
+		if len(os.Args) < 7 {
 			os.Exit(1)
 		}
 		vol, _ := strconv.ParseFloat(os.Args[3], 64)
-		// Start sound async, then show notification (blocks ~4s), then cleanup
+		targetHwnd := parseHwndArg(7)
 		mci(`open "` + os.Args[2] + `" type waveaudio alias peon`)
 		mci(fmt.Sprintf("setaudio peon volume to %d", int(vol*1000)))
 		mci("play peon")
-		showNotification(os.Args[4], os.Args[5])
+		showNotification(os.Args[4], os.Args[5], os.Args[6], targetHwnd)
 		mci("close peon")
 	}
+
+	shutdownGDIPlus()
+}
+
+func parseHwndArg(idx int) uintptr {
+	if idx < len(os.Args) {
+		v, err := strconv.ParseUint(os.Args[idx], 10, 64)
+		if err == nil {
+			return uintptr(v)
+		}
+	}
+	return 0
+}
+
+// --- GDI+ icon loading ---
+
+func loadGDIPImage(data []byte) uintptr {
+	if len(data) == 0 {
+		return 0
+	}
+	stream, _, _ := shCreateMemStream.Call(
+		uintptr(unsafe.Pointer(&data[0])),
+		uintptr(len(data)),
+	)
+	if stream == 0 {
+		return 0
+	}
+
+	var img uintptr
+	gdipCreateBitmapFromStream.Call(stream, uintptr(unsafe.Pointer(&img)))
+
+	// Release IStream
+	type vtbl struct{ QI, AddRef, Release uintptr }
+	vp := *(*uintptr)(unsafe.Pointer(stream))
+	v := (*vtbl)(unsafe.Pointer(vp))
+	syscall.SyscallN(v.Release, stream)
+
+	return img
+}
+
+func initGDIPlus() {
+	input := GdiplusStartupInput{GdiplusVersion: 1}
+	gdiplusStartup.Call(
+		uintptr(unsafe.Pointer(&gdipToken)),
+		uintptr(unsafe.Pointer(&input)),
+		0,
+	)
+
+	gdipImages = map[string]uintptr{
+		"complete":   loadGDIPImage(iconComplete),
+		"permission": loadGDIPImage(iconPermission),
+		"idle":       loadGDIPImage(iconIdle),
+	}
+}
+
+func shutdownGDIPlus() {
+	for _, img := range gdipImages {
+		if img != 0 {
+			gdipDisposeImage.Call(img)
+		}
+	}
+	if gdipToken != 0 {
+		gdiplusShutdown.Call(gdipToken)
+	}
+}
+
+func drawIcon(hdc uintptr, img uintptr, destX, destY, destSize int) {
+	if img == 0 {
+		return
+	}
+	var graphics uintptr
+	gdipCreateFromHDC.Call(hdc, uintptr(unsafe.Pointer(&graphics)))
+	if graphics == 0 {
+		return
+	}
+	gdipSetInterpolationMode.Call(graphics, 7) // HighQualityBicubic
+	gdipDrawImageRectI.Call(
+		graphics, img,
+		uintptr(destX), uintptr(destY),
+		uintptr(destSize), uintptr(destSize),
+	)
+	gdipDeleteGraphics.Call(graphics)
 }
 
 // --- Sound via MCI ---
@@ -178,9 +322,10 @@ func playWav(file string, volume float64) {
 
 // --- Notification popup via Win32 ---
 
-func showNotification(msg string, color string) {
-	notifyText = msg
-	notifyBgColor = colorToColorRef(color)
+func showNotification(title, msg, icon string, targetHwnd uintptr) {
+	notifyTitle = title
+	notifyMessage = msg
+	activeIcon = icon
 
 	className, _ := syscall.UTF16PtrFromString("PeonNotify")
 	hInst, _, _ := getModuleHandleW.Call(0)
@@ -194,31 +339,19 @@ func showNotification(msg string, color string) {
 	}
 	registerClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
-	// Get all monitor work areas
-	areas := getMonitorWorkAreas()
+	x, y := getPopupPosition(popupW, popupH, targetHwnd)
 
-	const popupW, popupH = 500, 80
-	for _, area := range areas {
-		x := int(area.Left) + (int(area.Right-area.Left)-popupW)/2
-		y := int(area.Top) + 40
+	hwnd, _, _ := createWindowExW.Call(
+		WS_EX_TOPMOST|WS_EX_TOOLWINDOW,
+		uintptr(unsafe.Pointer(className)),
+		0,
+		WS_POPUP|WS_VISIBLE,
+		uintptr(x), uintptr(y), popupW, popupH,
+		0, 0, hInst, 0,
+	)
+	notifyWindows = append(notifyWindows, hwnd)
+	setTimerProc.Call(hwnd, 1, 4000, 0)
 
-		hwnd, _, _ := createWindowExW.Call(
-			WS_EX_TOPMOST|WS_EX_TOOLWINDOW,
-			uintptr(unsafe.Pointer(className)),
-			0,
-			WS_POPUP|WS_VISIBLE,
-			uintptr(x), uintptr(y), popupW, popupH,
-			0, 0, hInst, 0,
-		)
-		notifyWindows = append(notifyWindows, hwnd)
-	}
-
-	// Auto-close after 4 seconds
-	if len(notifyWindows) > 0 {
-		setTimerProc.Call(notifyWindows[0], 1, 4000, 0)
-	}
-
-	// Message loop
 	var m MSG
 	for {
 		ret, _, _ := getMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
@@ -228,6 +361,23 @@ func showNotification(msg string, color string) {
 		translateMessage.Call(uintptr(unsafe.Pointer(&m)))
 		dispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
 	}
+}
+
+// fillRect is a helper that creates a solid brush, fills, and cleans up.
+func fillRect(hdc uintptr, r RECT, color uintptr) {
+	brush, _, _ := createSolidBrush.Call(color)
+	fillRectProc.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
+	deleteObjectProc.Call(brush)
+}
+
+// drawLine draws a single-pixel line.
+func drawLine(hdc uintptr, x1, y1, x2, y2 int32, color uintptr) {
+	pen, _, _ := createPenProc.Call(PS_SOLID, 1, color)
+	old, _, _ := selectObjectProc.Call(hdc, pen)
+	moveToExProc.Call(hdc, uintptr(x1), uintptr(y1), 0)
+	lineToProc.Call(hdc, uintptr(x2), uintptr(y2))
+	selectObjectProc.Call(hdc, old)
+	deleteObjectProc.Call(pen)
 }
 
 func notifyWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
@@ -242,38 +392,99 @@ func notifyWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		var ps PAINTSTRUCT
 		hdc, _, _ := beginPaintProc.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 
-		// Fill background
-		brush, _, _ := createSolidBrush.Call(uintptr(notifyBgColor))
-		fillRectProc.Call(hdc, uintptr(unsafe.Pointer(&ps.Paint)), brush)
-		deleteObjectProc.Call(brush)
+		w := int32(popupW)
+		h := int32(popupH)
 
-		// Set up text drawing
+		// Dark background fill
+		fillRect(hdc, RECT{0, 0, w, h}, colorBgDark)
+
+		// Outer gold border (3px beveled)
+		// Top edge - bright
+		fillRect(hdc, RECT{0, 0, w, borderW}, colorBorderLight)
+		// Left edge - bright
+		fillRect(hdc, RECT{0, 0, borderW, h}, colorBorderLight)
+		// Bottom edge - dark shadow
+		fillRect(hdc, RECT{0, h - borderW, w, h}, colorBorderShadow)
+		// Right edge - dark shadow
+		fillRect(hdc, RECT{w - borderW, 0, w, h}, colorBorderShadow)
+
+		// Inner highlight line (1px)
+		drawLine(hdc, borderW, borderW, w-borderW, borderW, colorBorderGold)           // top
+		drawLine(hdc, borderW, borderW, borderW, h-borderW, colorBorderGold)           // left
+		drawLine(hdc, borderW, h-borderW-1, w-borderW, h-borderW-1, colorBorderShadow) // bottom
+		drawLine(hdc, w-borderW-1, borderW, w-borderW-1, h-borderW, colorBorderShadow) // right
+
+		// Icon area: gold frame around the icon
+		ix := int32(iconPad)
+		iy := int32(iconPad)
+		is := int32(iconSize)
+		fr := int32(iconFrame)
+
+		// Icon frame (gold border around icon)
+		fillRect(hdc, RECT{ix - fr, iy - fr, ix + is + fr, iy - fr + fr}, colorBorderGold)     // top
+		fillRect(hdc, RECT{ix - fr, iy + is, ix + is + fr, iy + is + fr}, colorBorderGold)      // bottom
+		fillRect(hdc, RECT{ix - fr, iy - fr, ix - fr + fr, iy + is + fr}, colorBorderGold)      // left
+		fillRect(hdc, RECT{ix + is, iy - fr, ix + is + fr, iy + is + fr}, colorBorderGold)      // right
+
+		// Draw the icon
+		if img, ok := gdipImages[activeIcon]; ok {
+			drawIcon(hdc, img, int(ix), int(iy), int(is))
+		} else if img, ok := gdipImages["complete"]; ok {
+			drawIcon(hdc, img, int(ix), int(iy), int(is))
+		}
+
+		// Text area
 		setBkModeProc.Call(hdc, TRANSPARENT)
-		setTextColorProc.Call(hdc, 0x00FFFFFF) // white
-
+		textLeft := ix + is + int32(iconPad)
 		fontName, _ := syscall.UTF16PtrFromString("Segoe UI")
-		fontHeight := int32(-24) // ~16pt at 96dpi
-		font, _, _ := createFontW.Call(
-			uintptr(fontHeight),
+
+		// Title (large, gold, bold)
+		titleHeight := int32(-20)
+		titleFont, _, _ := createFontW.Call(
+			uintptr(titleHeight),
 			0, 0, 0,
 			FW_BOLD, 0, 0, 0,
 			DEFAULT_CHARSET, 0, 0, 0, 0,
 			uintptr(unsafe.Pointer(fontName)),
 		)
-		old, _, _ := selectObjectProc.Call(hdc, font)
+		oldFont, _, _ := selectObjectProc.Call(hdc, titleFont)
+		setTextColorProc.Call(hdc, colorTextGold)
 
-		text, _ := syscall.UTF16PtrFromString(notifyText)
-		rc := RECT{0, 0, 500, 80}
+		titleText, _ := syscall.UTF16PtrFromString(notifyTitle)
+		titleRC := RECT{textLeft, borderW + 10, w - borderW - 8, h/2 + 4}
 		drawTextProc.Call(
 			hdc,
-			uintptr(unsafe.Pointer(text)),
-			^uintptr(0), // -1 (null-terminated)
-			uintptr(unsafe.Pointer(&rc)),
-			DT_CENTER|DT_VCENTER|DT_SINGLELINE,
+			uintptr(unsafe.Pointer(titleText)),
+			^uintptr(0),
+			uintptr(unsafe.Pointer(&titleRC)),
+			DT_LEFT|DT_SINGLELINE,
 		)
+		selectObjectProc.Call(hdc, oldFont)
+		deleteObjectProc.Call(titleFont)
 
-		selectObjectProc.Call(hdc, old)
-		deleteObjectProc.Call(font)
+		// Message (smaller, lighter)
+		msgHeight := int32(-15)
+		msgFont, _, _ := createFontW.Call(
+			uintptr(msgHeight),
+			0, 0, 0,
+			0, 0, 0, 0, // normal weight
+			DEFAULT_CHARSET, 0, 0, 0, 0,
+			uintptr(unsafe.Pointer(fontName)),
+		)
+		oldFont2, _, _ := selectObjectProc.Call(hdc, msgFont)
+		setTextColorProc.Call(hdc, colorTextWhite)
+
+		msgText, _ := syscall.UTF16PtrFromString(notifyMessage)
+		msgRC := RECT{textLeft, h/2 - 2, w - borderW - 8, h - borderW - 8}
+		drawTextProc.Call(
+			hdc,
+			uintptr(unsafe.Pointer(msgText)),
+			^uintptr(0),
+			uintptr(unsafe.Pointer(&msgRC)),
+			DT_LEFT|DT_SINGLELINE,
+		)
+		selectObjectProc.Call(hdc, oldFont2)
+		deleteObjectProc.Call(msgFont)
 		endPaintProc.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		return 0
 
@@ -286,27 +497,24 @@ func notifyWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	return ret
 }
 
-func getMonitorWorkAreas() []RECT {
-	var areas []RECT
-	cb := syscall.NewCallback(func(hMon, hdc uintptr, lprc *RECT, lParam uintptr) uintptr {
-		var mi MONITORINFO
-		mi.Size = uint32(unsafe.Sizeof(mi))
-		getMonitorInfoW.Call(hMon, uintptr(unsafe.Pointer(&mi)))
-		areas = append(areas, mi.Work)
-		return 1 // continue enumeration
-	})
-	enumDisplayMonitors.Call(0, 0, cb, 0)
-	return areas
-}
-
-// colorToColorRef converts a color name to Windows COLORREF (0x00BBGGRR).
-func colorToColorRef(color string) uint32 {
-	switch color {
-	case "blue":
-		return 180<<16 | 80<<8 | 30 // RGB(30, 80, 180)
-	case "yellow":
-		return 0<<16 | 160<<8 | 200 // RGB(200, 160, 0)
-	default: // red
-		return 0<<16 | 0<<8 | 180 // RGB(180, 0, 0)
+func getPopupPosition(pw, ph int, targetHwnd uintptr) (int, int) {
+	candidates := []uintptr{targetHwnd}
+	if fg, _, _ := getForegroundWindow.Call(); fg != 0 {
+		candidates = append(candidates, fg)
 	}
+
+	for _, hwnd := range candidates {
+		if hwnd == 0 {
+			continue
+		}
+		var rc RECT
+		ret, _, _ := getWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&rc)))
+		if ret != 0 && rc.Right > rc.Left {
+			winW := int(rc.Right - rc.Left)
+			x := int(rc.Left) + (winW-pw)/2
+			y := int(rc.Top) + 40
+			return x, y
+		}
+	}
+	return 100, 40
 }
