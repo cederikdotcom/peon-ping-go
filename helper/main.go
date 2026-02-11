@@ -320,9 +320,50 @@ func playWav(file string, volume float64) {
 	mci("close peon")
 }
 
+// --- Monitor enumeration ---
+
+var (
+	enumDisplayMonitors = user32.NewProc("EnumDisplayMonitors")
+	findWindowExW       = user32.NewProc("FindWindowExW")
+)
+
+// monitorRects collects all monitor rectangles during enumeration.
+var monitorRects []RECT
+
+func enumMonitorCallback(hMonitor, hdc uintptr, lpRect *RECT, lParam uintptr) uintptr {
+	if lpRect != nil {
+		monitorRects = append(monitorRects, *lpRect)
+	}
+	return 1 // continue enumeration
+}
+
+func getMonitors() []RECT {
+	monitorRects = nil
+	cb := syscall.NewCallback(enumMonitorCallback)
+	enumDisplayMonitors.Call(0, 0, cb, 0)
+	return monitorRects
+}
+
+// countExistingPopups counts how many PeonNotify windows already exist,
+// so new popups can stack below them.
+func countExistingPopups() int {
+	className, _ := syscall.UTF16PtrFromString("PeonNotify")
+	count := 0
+	var prev uintptr
+	for {
+		found, _, _ := findWindowExW.Call(0, prev, uintptr(unsafe.Pointer(className)), 0)
+		if found == 0 {
+			break
+		}
+		count++
+		prev = found
+	}
+	return count
+}
+
 // --- Notification popup via Win32 ---
 
-func showNotification(title, msg, icon string, targetHwnd uintptr) {
+func showNotification(title, msg, icon string, _ uintptr) {
 	notifyTitle = title
 	notifyMessage = msg
 	activeIcon = icon
@@ -339,18 +380,37 @@ func showNotification(title, msg, icon string, targetHwnd uintptr) {
 	}
 	registerClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
-	x, y := getPopupPosition(popupW, popupH, targetHwnd)
+	// Create a popup on every monitor
+	monitors := getMonitors()
 
-	hwnd, _, _ := createWindowExW.Call(
-		WS_EX_TOPMOST|WS_EX_TOOLWINDOW,
-		uintptr(unsafe.Pointer(className)),
-		0,
-		WS_POPUP|WS_VISIBLE,
-		uintptr(x), uintptr(y), popupW, popupH,
-		0, 0, hInst, 0,
-	)
-	notifyWindows = append(notifyWindows, hwnd)
-	setTimerProc.Call(hwnd, 1, 4000, 0)
+	// Stack below any existing popups (divide by monitor count since each
+	// notification creates one window per monitor)
+	existing := countExistingPopups()
+	monCount := len(monitors)
+	if monCount < 1 {
+		monCount = 1
+	}
+	stackOffset := (existing / monCount) * (popupH + 6)
+	for _, mon := range monitors {
+		monW := int(mon.Right - mon.Left)
+		x := int(mon.Left) + (monW-popupW)/2
+		y := int(mon.Top) + 2 + stackOffset
+
+		hwnd, _, _ := createWindowExW.Call(
+			WS_EX_TOPMOST|WS_EX_TOOLWINDOW,
+			uintptr(unsafe.Pointer(className)),
+			0,
+			WS_POPUP|WS_VISIBLE,
+			uintptr(x), uintptr(y), popupW, popupH,
+			0, 0, hInst, 0,
+		)
+		notifyWindows = append(notifyWindows, hwnd)
+	}
+
+	// Set timer on first window to auto-close all after 4 seconds
+	if len(notifyWindows) > 0 {
+		setTimerProc.Call(notifyWindows[0], 1, 4000, 0)
+	}
 
 	var m MSG
 	for {
@@ -497,24 +557,3 @@ func notifyWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	return ret
 }
 
-func getPopupPosition(pw, ph int, targetHwnd uintptr) (int, int) {
-	candidates := []uintptr{targetHwnd}
-	if fg, _, _ := getForegroundWindow.Call(); fg != 0 {
-		candidates = append(candidates, fg)
-	}
-
-	for _, hwnd := range candidates {
-		if hwnd == 0 {
-			continue
-		}
-		var rc RECT
-		ret, _, _ := getWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&rc)))
-		if ret != 0 && rc.Right > rc.Left {
-			winW := int(rc.Right - rc.Left)
-			x := int(rc.Left) + (winW-pw)/2
-			y := int(rc.Top) + 40
-			return x, y
-		}
-	}
-	return 100, 40
-}
