@@ -43,6 +43,15 @@ func runCLI(peonDir string, args []string) {
 		}
 		os.Exit(0)
 
+	case "--dismiss":
+		n := dismissNotifications()
+		if n == 0 {
+			fmt.Println("peon-ping: no hanging notifications found")
+		} else {
+			fmt.Printf("peon-ping: dismissed %d notification(s)\n", n)
+		}
+		os.Exit(0)
+
 	case "--status":
 		if _, err := os.Stat(pausedFile); err == nil {
 			fmt.Println("peon-ping: paused")
@@ -171,6 +180,7 @@ Commands:
   --resume          Unmute sounds
   --toggle          Toggle mute on/off
   --status          Check if paused or active
+  --dismiss         Close all hanging notification windows
   --packs           List available sound packs
   --pack <name>     Switch to a specific pack
   --pack            Cycle to the next pack

@@ -42,6 +42,7 @@ var (
 	translateMessage    = user32.NewProc("TranslateMessage")
 	dispatchMessageW    = user32.NewProc("DispatchMessageW")
 	postQuitMessage     = user32.NewProc("PostQuitMessage")
+	postMessageW        = user32.NewProc("PostMessageW")
 	destroyWindowProc   = user32.NewProc("DestroyWindow")
 	setTimerProc        = user32.NewProc("SetTimer")
 	getForegroundWindow = user32.NewProc("GetForegroundWindow")
@@ -88,6 +89,7 @@ const (
 	WS_EX_TOOLWINDOW = 0x00000080
 	CS_HREDRAW       = 0x0002
 	CS_VREDRAW       = 0x0001
+	WM_CLOSE         = 0x0010
 	WM_DESTROY       = 0x0002
 	WM_PAINT         = 0x000F
 	WM_TIMER         = 0x0113
@@ -98,6 +100,7 @@ const (
 	FW_BOLD          = 700
 	DEFAULT_CHARSET  = 1
 	PS_SOLID         = 0
+	PROCESS_TERMINATE = 0x0001
 )
 
 // WC3 color palette
@@ -180,11 +183,15 @@ func main() {
 	initGDIPlus()
 
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: peon-helper.exe <play|notify|both|hwnd> ...")
+		fmt.Fprintln(os.Stderr, "Usage: peon-helper.exe <play|notify|both|hwnd|dismiss> ...")
 		os.Exit(1)
 	}
 
 	switch os.Args[1] {
+	case "dismiss":
+		n := dismissAllNotifications()
+		fmt.Println(n)
+
 	case "hwnd":
 		hwnd, _, _ := getForegroundWindow.Call()
 		fmt.Println(hwnd)
@@ -324,7 +331,11 @@ func playWav(file string, volume float64) {
 
 var (
 	enumDisplayMonitors = user32.NewProc("EnumDisplayMonitors")
-	findWindowExW       = user32.NewProc("FindWindowExW")
+	findWindowExW            = user32.NewProc("FindWindowExW")
+	getWindowThreadProcessId = user32.NewProc("GetWindowThreadProcessId")
+	openProcess              = kernel32.NewProc("OpenProcess")
+	terminateProcess         = kernel32.NewProc("TerminateProcess")
+	closeHandleProc          = kernel32.NewProc("CloseHandle")
 )
 
 // monitorRects collects all monitor rectangles during enumeration.
@@ -359,6 +370,40 @@ func countExistingPopups() int {
 		prev = found
 	}
 	return count
+}
+
+// dismissAllNotifications finds all PeonNotify windows and terminates their
+// owning processes. This is more reliable than posting WM_CLOSE, which won't
+// work if the owning process's message loop is hung.
+func dismissAllNotifications() int {
+	className, _ := syscall.UTF16PtrFromString("PeonNotify")
+	myPID := uint32(os.Getpid())
+
+	// Collect unique PIDs that own PeonNotify windows.
+	pids := make(map[uint32]bool)
+	var prev uintptr
+	for {
+		found, _, _ := findWindowExW.Call(0, prev, uintptr(unsafe.Pointer(className)), 0)
+		if found == 0 {
+			break
+		}
+		var pid uint32
+		getWindowThreadProcessId.Call(found, uintptr(unsafe.Pointer(&pid)))
+		if pid != 0 && pid != myPID {
+			pids[pid] = true
+		}
+		prev = found
+	}
+
+	// Terminate each owning process. Windows destroys all its windows.
+	for pid := range pids {
+		h, _, _ := openProcess.Call(PROCESS_TERMINATE, 0, uintptr(pid))
+		if h != 0 {
+			terminateProcess.Call(h, 0)
+			closeHandleProc.Call(h)
+		}
+	}
+	return len(pids)
 }
 
 // --- Notification popup via Win32 ---

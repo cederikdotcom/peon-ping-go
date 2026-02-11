@@ -66,6 +66,22 @@ func sendNotification(title, msg, icon string, hwnd uint64) {
 	detach(args...)
 }
 
+// dismissNotifications closes all hanging notification windows.
+// Returns the number of helper processes terminated.
+func dismissNotifications() int {
+	helper := findHelper()
+	if helper == "" {
+		return 0
+	}
+	out, err := exec.Command(helper, "dismiss").Output()
+	if err != nil {
+		return 0
+	}
+	var n int
+	fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &n)
+	return n
+}
+
 // playSoundAndNotify plays sound + shows notification in a single helper process.
 func playSoundAndNotify(file string, volume float64, title, msg, icon string, hwnd uint64) {
 	args := []string{"both", toWindowsPath(file), fmt.Sprintf("%g", volume), title, msg, icon}
