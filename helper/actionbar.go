@@ -92,18 +92,6 @@ func init() {
 	abSelectedSlot = -1
 }
 
-// abStateIcon maps route status to an embedded icon name.
-func abStateIcon(state string) string {
-	switch state {
-	case "done":
-		return "complete"
-	case "needs approval", "has question":
-		return "permission"
-	default: // "working", "ready"
-		return "idle"
-	}
-}
-
 // abNeedsAttention returns true if the state requires user attention (gold ring).
 func abNeedsAttention(state string) bool {
 	return state == "needs approval" || state == "has question"

@@ -33,8 +33,12 @@ type hookDecision struct {
 }
 
 // handlePermissionRequest handles PermissionRequest hook events by updating
-// the action bar state and polling for a response file. Falls back to terminal
-// dialog on timeout.
+// the action bar state and polling for a response file written by the action
+// bar helper. Falls back to terminal dialog on timeout.
+//
+// This is the single source of truth for "needs approval" state — the
+// Notification(permission_prompt) hook deliberately skips action bar writes
+// to avoid racing with this handler.
 func handlePermissionRequest(peonDir string, raw []byte) {
 	var payload struct {
 		SessionID             string          `json:"session_id"`
@@ -79,8 +83,9 @@ func handlePermissionRequest(peonDir string, raw []byte) {
 			continue
 		}
 
-		// Clean up response file and update action bar to "working".
+		// Clean up response + heartbeat files and update action bar to "working".
 		os.Remove(rspPath)
+		os.Remove(heartbeatPath)
 		clearActionBarPermission(peonDir, payload.SessionID)
 
 		// Build and output the hook response.
@@ -102,7 +107,8 @@ func handlePermissionRequest(peonDir string, raw []byte) {
 		os.Exit(0)
 	}
 
-	// Timeout: exit 0 to fall through to terminal dialog.
+	// Timeout: clean up heartbeat and fall through to terminal dialog.
+	os.Remove(heartbeatPath)
 	os.Exit(0)
 }
 
@@ -125,19 +131,6 @@ func main() {
 	input, err := io.ReadAll(os.Stdin)
 	if err != nil || len(input) == 0 {
 		os.Exit(0)
-	}
-
-	// Debug dump: write raw stdin JSON for Stop events to inspect full payload.
-	{
-		var probe struct {
-			HookEventName string `json:"hook_event_name"`
-		}
-		json.Unmarshal(input, &probe)
-		if probe.HookEventName == "Stop" {
-			ts := time.Now().UnixMilli()
-			debugPath := filepath.Join(peonDir, fmt.Sprintf(".hook-debug-%d.json", ts))
-			os.WriteFile(debugPath, input, 0644)
-		}
 	}
 
 	// Early intercept: PermissionRequest hook gets special blocking handling.
@@ -183,8 +176,7 @@ func main() {
 
 	// Check agent suppression (needs original Claude payload for permission_mode).
 	permissionMode := ""
-	if ca, ok := adapter.(ClaudeAdapter); ok {
-		_ = ca // we already parsed; get permission_mode from re-parsing
+	if _, ok := adapter.(ClaudeAdapter); ok {
 		var cp claudePayload
 		json.Unmarshal(input, &cp)
 		permissionMode = cp.PermissionMode
@@ -269,7 +261,9 @@ func main() {
 	}
 
 	// Update action bar state.
-	if event.SessionID != "" && route.Status != "" {
+	// Skip for permission_needed — handlePermissionRequest is the single source
+	// of truth for "needs approval" state (avoids dual-write race).
+	if event.SessionID != "" && route.Status != "" && event.Type != "permission_needed" {
 		writeActionBarSession(peonDir, event.SessionID, project, route.Status, event.Message, targetHwnd)
 	}
 

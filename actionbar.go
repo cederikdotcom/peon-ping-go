@@ -7,6 +7,22 @@ import (
 	"time"
 )
 
+// Action bar state machine:
+//
+//   SessionStart ──────► "ready"
+//   UserPromptSubmit ──► "working"
+//   Stop ──────────────► "done"
+//   PermissionRequest ─► "needs approval" (with tool details + heartbeat)
+//   Notification(idle) ► "has question"
+//   SessionEnd ────────► removed
+//
+// The "needs approval" state is exclusively managed by handlePermissionRequest
+// (via updateActionBarPermission/clearActionBarPermission). Other hooks skip
+// action bar writes for permission events to avoid dual-write races.
+//
+// The helper detects stale heartbeats to visually override "needs approval"
+// to "working" when permissions are handled in-terminal.
+
 // ActionBarSession represents a single Claude Code session in the action bar.
 type ActionBarSession struct {
 	Project              string          `json:"project"`
@@ -54,20 +70,13 @@ func writeActionBarSession(peonDir, sessionID, project, state, message string, h
 		}
 	}
 
-	sess := ActionBarSession{
+	abs.Sessions[sessionID] = ActionBarSession{
 		Project:   project,
 		State:     state,
 		Message:   message,
 		HWND:      hwnd,
 		UpdatedAt: now,
 	}
-	// Preserve tool details if the session already has them and state is still "needs approval".
-	if existing, ok := abs.Sessions[sessionID]; ok && state == "needs approval" && existing.ToolName != "" {
-		sess.ToolName = existing.ToolName
-		sess.ToolInput = existing.ToolInput
-		sess.PermissionSuggestions = existing.PermissionSuggestions
-	}
-	abs.Sessions[sessionID] = sess
 
 	data, err := json.Marshal(abs)
 	if err != nil {
