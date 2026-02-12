@@ -253,6 +253,16 @@ func main() {
 		showNotification(os.Args[4], os.Args[5], os.Args[6], targetHwnd)
 		mci("close peon")
 
+	case "actionbar-check":
+		// Check if a PeonActionBar window exists. Prints "1" or "0".
+		className, _ := syscall.UTF16PtrFromString("PeonActionBar")
+		found, _, _ := findWindowExW.Call(0, 0, uintptr(unsafe.Pointer(className)), 0)
+		if found != 0 {
+			fmt.Println("1")
+		} else {
+			fmt.Println("0")
+		}
+
 	case "actionbar":
 		// actionbar <state-file>
 		if len(os.Args) < 3 {

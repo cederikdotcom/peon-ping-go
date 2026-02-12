@@ -53,6 +53,10 @@ func runCLI(peonDir string, args []string) {
 		os.Exit(0)
 
 	case "--actionbar":
+		if actionBarRunning() {
+			fmt.Println("peon-ping: action bar already running")
+			os.Exit(0)
+		}
 		abFile := toWindowsPath(actionBarPath(peonDir))
 		detach("actionbar", abFile)
 		fmt.Println("peon-ping: action bar launched")

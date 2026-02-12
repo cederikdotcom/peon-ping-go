@@ -31,3 +31,15 @@ func playSoundAndNotify(file string, volume float64, title, msg, icon string, hw
 	playSound(file, volume)
 	sendNotification(title, msg, icon, hwnd)
 }
+
+// dismissNotifications is a no-op on macOS.
+func dismissNotifications() int { return 0 }
+
+// actionBarRunning is a no-op on macOS (action bar is Windows-only).
+func actionBarRunning() bool { return false }
+
+// toWindowsPath is a no-op on macOS.
+func toWindowsPath(p string) string { return p }
+
+// detach is a no-op on macOS.
+func detach(args ...string) {}

@@ -66,6 +66,19 @@ func sendNotification(title, msg, icon string, hwnd uint64) {
 	detach(args...)
 }
 
+// actionBarRunning checks if a PeonActionBar window already exists.
+func actionBarRunning() bool {
+	helper := findHelper()
+	if helper == "" {
+		return false
+	}
+	out, err := exec.Command(helper, "actionbar-check").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "1"
+}
+
 // dismissNotifications closes all hanging notification windows.
 // Returns the number of helper processes terminated.
 func dismissNotifications() int {
