@@ -5,7 +5,8 @@ type Event struct {
 	Type      string // "session_start", "prompt_submit", "task_complete", "permission_needed", "idle"
 	CWD       string
 	SessionID string
-	AgentMode bool // suppress sounds for non-interactive sessions
+	AgentMode bool   // suppress sounds for non-interactive sessions
+	Message   string // notification message (e.g. "Claude needs your permission to use Bash")
 }
 
 // Route describes what to do for a given event.

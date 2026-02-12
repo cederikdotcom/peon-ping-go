@@ -11,6 +11,112 @@ import (
 	"time"
 )
 
+// permissionReqFile is the request file written by peon for the action bar to read.
+type permissionReqFile struct {
+	ToolName              string          `json:"tool_name"`
+	ToolInput             json.RawMessage `json:"tool_input"`
+	PermissionSuggestions json.RawMessage `json:"permission_suggestions,omitempty"`
+	CreatedAt             int64           `json:"created_at"`
+}
+
+// permissionRspFile is the response file written by the action bar helper.
+type permissionRspFile struct {
+	Behavior         string `json:"behavior"` // "allow" or "deny"
+	ApplySuggestions bool   `json:"apply_suggestions,omitempty"`
+}
+
+// hookOutput is the JSON structure Claude Code expects on stdout from a PermissionRequest hook.
+type hookOutput struct {
+	HookSpecificOutput hookSpecificOutput `json:"hookSpecificOutput"`
+}
+
+type hookSpecificOutput struct {
+	HookEventName string           `json:"hookEventName"`
+	Decision      hookDecision     `json:"decision"`
+}
+
+type hookDecision struct {
+	Behavior           string          `json:"behavior"`
+	UpdatedPermissions json.RawMessage `json:"updatedPermissions,omitempty"`
+}
+
+// handlePermissionRequest handles PermissionRequest hook events by writing a request file
+// for the action bar and polling for a response. Falls back to terminal dialog on timeout.
+func handlePermissionRequest(peonDir string, raw []byte) {
+	var payload struct {
+		SessionID             string          `json:"session_id"`
+		ToolName              string          `json:"tool_name"`
+		ToolInput             json.RawMessage `json:"tool_input"`
+		PermissionSuggestions json.RawMessage `json:"permission_suggestions"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil || payload.SessionID == "" {
+		os.Exit(0)
+	}
+
+	reqPath := filepath.Join(peonDir, ".actionbar-req-"+payload.SessionID+".json")
+	rspPath := filepath.Join(peonDir, ".actionbar-rsp-"+payload.SessionID+".json")
+
+	// Clean up any stale response file.
+	os.Remove(rspPath)
+
+	// Write request file for the action bar to pick up.
+	req := permissionReqFile{
+		ToolName:              payload.ToolName,
+		ToolInput:             payload.ToolInput,
+		PermissionSuggestions: payload.PermissionSuggestions,
+		CreatedAt:             time.Now().Unix(),
+	}
+	reqData, err := json.Marshal(req)
+	if err != nil {
+		os.Exit(0)
+	}
+	if err := os.WriteFile(reqPath, reqData, 0644); err != nil {
+		os.Exit(0)
+	}
+
+	// Poll for response file (500ms intervals, up to 5 minutes).
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(500 * time.Millisecond)
+
+		rspData, err := os.ReadFile(rspPath)
+		if err != nil {
+			continue // not yet written
+		}
+
+		var rsp permissionRspFile
+		if err := json.Unmarshal(rspData, &rsp); err != nil {
+			continue
+		}
+
+		// Clean up both files.
+		os.Remove(reqPath)
+		os.Remove(rspPath)
+
+		// Build and output the hook response.
+		decision := hookDecision{
+			Behavior: rsp.Behavior,
+		}
+		if rsp.ApplySuggestions && len(payload.PermissionSuggestions) > 0 {
+			decision.UpdatedPermissions = payload.PermissionSuggestions
+		}
+
+		out := hookOutput{
+			HookSpecificOutput: hookSpecificOutput{
+				HookEventName: "PermissionRequest",
+				Decision:      decision,
+			},
+		}
+		outData, _ := json.Marshal(out)
+		fmt.Println(string(outData))
+		os.Exit(0)
+	}
+
+	// Timeout: clean up request file, exit 0 to fall through to terminal dialog.
+	os.Remove(reqPath)
+	os.Exit(0)
+}
+
 const version = "2.0.0"
 
 func main() {
@@ -30,6 +136,16 @@ func main() {
 	input, err := io.ReadAll(os.Stdin)
 	if err != nil || len(input) == 0 {
 		os.Exit(0)
+	}
+
+	// Early intercept: PermissionRequest hook gets special blocking handling.
+	var probe struct {
+		HookEventName string `json:"hook_event_name"`
+	}
+	json.Unmarshal(input, &probe)
+	if probe.HookEventName == "PermissionRequest" {
+		handlePermissionRequest(peonDir, input)
+		// handlePermissionRequest always calls os.Exit; this is unreachable.
 	}
 
 	// Detect harness and parse event.
@@ -146,7 +262,7 @@ func main() {
 
 	// Update action bar state.
 	if event.SessionID != "" && route.Status != "" {
-		writeActionBarSession(peonDir, event.SessionID, project, route.Status, targetHwnd)
+		writeActionBarSession(peonDir, event.SessionID, project, route.Status, event.Message, targetHwnd)
 	}
 
 	// Play sound and/or notify.

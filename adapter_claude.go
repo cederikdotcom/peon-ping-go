@@ -6,6 +6,8 @@ import "encoding/json"
 type claudePayload struct {
 	HookEventName    string `json:"hook_event_name"`
 	NotificationType string `json:"notification_type"`
+	Message          string `json:"message"`
+	Title            string `json:"title"`
 	CWD              string `json:"cwd"`
 	SessionID        string `json:"session_id"`
 	PermissionMode   string `json:"permission_mode"`
@@ -24,6 +26,7 @@ func (ClaudeAdapter) Parse(raw json.RawMessage) (Event, error) {
 		CWD:       p.CWD,
 		SessionID: p.SessionID,
 		AgentMode: p.PermissionMode == "delegate",
+		Message:   p.Message,
 	}
 
 	switch p.HookEventName {

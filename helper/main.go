@@ -30,6 +30,8 @@ var (
 	gdi32      = syscall.NewLazyDLL("gdi32.dll")
 	kernel32   = syscall.NewLazyDLL("kernel32.dll")
 	gdiplus    = syscall.NewLazyDLL("gdiplus.dll")
+	shell32    = syscall.NewLazyDLL("shell32.dll")
+	ole32      = syscall.NewLazyDLL("ole32.dll")
 	shlwapiDLL = syscall.NewLazyDLL("shlwapi.dll")
 
 	// Sound
@@ -53,6 +55,7 @@ var (
 	getWindowRect           = user32.NewProc("GetWindowRect")
 	loadCursorW             = user32.NewProc("LoadCursorW")
 	setWindowPosProc        = user32.NewProc("SetWindowPos")
+	setFocusProc            = user32.NewProc("SetFocus")
 	getModuleHandleW        = kernel32.NewProc("GetModuleHandleW")
 
 	// DPI
@@ -82,6 +85,12 @@ var (
 	gdipDrawImageRectI         = gdiplus.NewProc("GdipDrawImageRectI")
 	gdipDisposeImage           = gdiplus.NewProc("GdipDisposeImage")
 	gdipSetInterpolationMode   = gdiplus.NewProc("GdipSetInterpolationMode")
+
+	// Shell
+	shellExecuteW  = shell32.NewProc("ShellExecuteW")
+	shBrowseForFolderW = shell32.NewProc("SHBrowseForFolderW")
+	shGetPathFromIDListW = shell32.NewProc("SHGetPathFromIDListW")
+	coInitializeEx = ole32.NewProc("CoInitializeEx")
 
 	// COM stream
 	shCreateMemStream = shlwapiDLL.NewProc("SHCreateMemStream")
@@ -114,6 +123,12 @@ const (
 	IDC_ARROW        = 32512
 	SWP_NOMOVE       = 0x0002
 	SWP_NOSIZE       = 0x0001
+	WM_KEYDOWN       = 0x0100
+	VK_ESCAPE        = 0x1B
+	VK_1             = 0x31
+	VK_2             = 0x32
+	VK_3             = 0x33
+	WM_USER          = 0x0400
 )
 
 // WC3 color palette

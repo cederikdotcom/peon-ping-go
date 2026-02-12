@@ -11,6 +11,7 @@ import (
 type ActionBarSession struct {
 	Project   string `json:"project"`
 	State     string `json:"state"` // "working", "done", "needs approval", "ready"
+	Message   string `json:"message,omitempty"`
 	HWND      uint64 `json:"hwnd"`
 	UpdatedAt int64  `json:"updated_at"` // unix timestamp
 }
@@ -26,7 +27,7 @@ func actionBarPath(peonDir string) string {
 
 // writeActionBarSession updates a single session in the action bar state file.
 // Single writer (main binary), reader tolerates partial reads.
-func writeActionBarSession(peonDir, sessionID, project, state string, hwnd uint64) {
+func writeActionBarSession(peonDir, sessionID, project, state, message string, hwnd uint64) {
 	if sessionID == "" {
 		return
 	}
@@ -53,6 +54,7 @@ func writeActionBarSession(peonDir, sessionID, project, state string, hwnd uint6
 	abs.Sessions[sessionID] = ActionBarSession{
 		Project:   project,
 		State:     state,
+		Message:   message,
 		HWND:      hwnd,
 		UpdatedAt: now,
 	}
