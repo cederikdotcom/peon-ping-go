@@ -52,10 +52,11 @@ func routeEvent(e Event) Route {
 		}
 	case "idle":
 		return Route{
-			Status:      "done",
+			Category:    "permission",
+			Status:      "has question",
 			Marker:      "● ",
 			Notify:      true,
-			NotifyIcon: "idle",
+			NotifyIcon: "permission",
 			NotifyMsg:   "Waiting for input",
 		}
 	default:

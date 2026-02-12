@@ -9,11 +9,14 @@ import (
 
 // ActionBarSession represents a single Claude Code session in the action bar.
 type ActionBarSession struct {
-	Project   string `json:"project"`
-	State     string `json:"state"` // "working", "done", "needs approval", "ready"
-	Message   string `json:"message,omitempty"`
-	HWND      uint64 `json:"hwnd"`
-	UpdatedAt int64  `json:"updated_at"` // unix timestamp
+	Project              string          `json:"project"`
+	State                string          `json:"state"` // "working", "done", "needs approval", "ready"
+	Message              string          `json:"message,omitempty"`
+	HWND                 uint64          `json:"hwnd"`
+	UpdatedAt            int64           `json:"updated_at"` // unix timestamp
+	ToolName             string          `json:"tool_name,omitempty"`
+	ToolInput            json.RawMessage `json:"tool_input,omitempty"`
+	PermissionSuggestions json.RawMessage `json:"permission_suggestions,omitempty"`
 }
 
 // ActionBarState holds all sessions for the action bar to display.
@@ -43,7 +46,7 @@ func writeActionBarSession(peonDir, sessionID, project, state, message string, h
 		abs.Sessions = make(map[string]ActionBarSession)
 	}
 
-	// Prune sessions older than 10 minutes.
+	// Prune sessions older than 10 minutes (safety net).
 	now := time.Now().Unix()
 	for id, s := range abs.Sessions {
 		if now-s.UpdatedAt > 600 {
@@ -51,17 +54,121 @@ func writeActionBarSession(peonDir, sessionID, project, state, message string, h
 		}
 	}
 
-	abs.Sessions[sessionID] = ActionBarSession{
+	sess := ActionBarSession{
 		Project:   project,
 		State:     state,
 		Message:   message,
 		HWND:      hwnd,
 		UpdatedAt: now,
 	}
+	// Preserve tool details if the session already has them and state is still "needs approval".
+	if existing, ok := abs.Sessions[sessionID]; ok && state == "needs approval" && existing.ToolName != "" {
+		sess.ToolName = existing.ToolName
+		sess.ToolInput = existing.ToolInput
+		sess.PermissionSuggestions = existing.PermissionSuggestions
+	}
+	abs.Sessions[sessionID] = sess
 
 	data, err := json.Marshal(abs)
 	if err != nil {
 		return
 	}
-	os.WriteFile(abPath, data, 0644)
+	atomicWriteFile(abPath, data)
+}
+
+// removeActionBarSession removes a session from the action bar state file.
+func removeActionBarSession(peonDir, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+
+	abPath := actionBarPath(peonDir)
+
+	var abs ActionBarState
+	if data, err := os.ReadFile(abPath); err == nil {
+		json.Unmarshal(data, &abs)
+	}
+	if abs.Sessions == nil {
+		return
+	}
+
+	delete(abs.Sessions, sessionID)
+
+	data, err := json.Marshal(abs)
+	if err != nil {
+		return
+	}
+	atomicWriteFile(abPath, data)
+}
+
+// updateActionBarPermission sets a session to "needs approval" with tool details.
+// This is the single source of truth — the helper reads tool info from here.
+func updateActionBarPermission(peonDir, sessionID, toolName string, toolInput, permSuggestions json.RawMessage) {
+	if sessionID == "" {
+		return
+	}
+	abPath := actionBarPath(peonDir)
+	var abs ActionBarState
+	if data, err := os.ReadFile(abPath); err == nil {
+		json.Unmarshal(data, &abs)
+	}
+	if abs.Sessions == nil {
+		return // session doesn't exist yet, nothing to update
+	}
+	s, ok := abs.Sessions[sessionID]
+	if !ok {
+		return
+	}
+	s.State = "needs approval"
+	s.ToolName = toolName
+	s.ToolInput = toolInput
+	s.PermissionSuggestions = permSuggestions
+	s.UpdatedAt = time.Now().Unix()
+	abs.Sessions[sessionID] = s
+	data, err := json.Marshal(abs)
+	if err != nil {
+		return
+	}
+	atomicWriteFile(abPath, data)
+}
+
+// clearActionBarPermission resets a session from "needs approval" to "working",
+// clearing tool details. Called when a permission is resolved or the hook exits.
+func clearActionBarPermission(peonDir, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	abPath := actionBarPath(peonDir)
+	var abs ActionBarState
+	if data, err := os.ReadFile(abPath); err == nil {
+		json.Unmarshal(data, &abs)
+	}
+	if abs.Sessions == nil {
+		return
+	}
+	s, ok := abs.Sessions[sessionID]
+	if !ok {
+		return
+	}
+	s.State = "working"
+	s.ToolName = ""
+	s.ToolInput = nil
+	s.PermissionSuggestions = nil
+	s.UpdatedAt = time.Now().Unix()
+	abs.Sessions[sessionID] = s
+	data, err := json.Marshal(abs)
+	if err != nil {
+		return
+	}
+	atomicWriteFile(abPath, data)
+}
+
+// atomicWriteFile writes data to a temp file then renames it into place,
+// preventing readers from seeing partial/corrupt content.
+func atomicWriteFile(path string, data []byte) {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return
+	}
+	os.Rename(tmp, path)
 }

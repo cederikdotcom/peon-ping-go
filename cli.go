@@ -62,6 +62,13 @@ func runCLI(peonDir string, args []string) {
 		fmt.Println("peon-ping: action bar launched")
 		os.Exit(0)
 
+	case "--actionbar-restart":
+		// Force restart: the helper's runActionBar kills existing instances.
+		abFile := toWindowsPath(actionBarPath(peonDir))
+		detach("actionbar", abFile)
+		fmt.Println("peon-ping: action bar restarted")
+		os.Exit(0)
+
 	case "--status":
 		if _, err := os.Stat(pausedFile); err == nil {
 			fmt.Println("peon-ping: paused")

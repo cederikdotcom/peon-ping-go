@@ -72,9 +72,13 @@ var (
 	createFontW      = gdi32.NewProc("CreateFontW")
 	selectObjectProc = gdi32.NewProc("SelectObject")
 	deleteObjectProc = gdi32.NewProc("DeleteObject")
-	createPenProc    = gdi32.NewProc("CreatePen")
-	moveToExProc     = gdi32.NewProc("MoveToEx")
-	lineToProc       = gdi32.NewProc("LineTo")
+	createPenProc          = gdi32.NewProc("CreatePen")
+	moveToExProc           = gdi32.NewProc("MoveToEx")
+	lineToProc             = gdi32.NewProc("LineTo")
+	createCompatibleDC     = gdi32.NewProc("CreateCompatibleDC")
+	createCompatibleBitmap = gdi32.NewProc("CreateCompatibleBitmap")
+	bitBltProc             = gdi32.NewProc("BitBlt")
+	deleteDCProc           = gdi32.NewProc("DeleteDC")
 
 	// GDI+
 	gdiplusStartup             = gdiplus.NewProc("GdiplusStartup")
@@ -85,6 +89,18 @@ var (
 	gdipDrawImageRectI         = gdiplus.NewProc("GdipDrawImageRectI")
 	gdipDisposeImage           = gdiplus.NewProc("GdipDisposeImage")
 	gdipSetInterpolationMode   = gdiplus.NewProc("GdipSetInterpolationMode")
+
+	// Clipboard
+	openClipboardProc    = user32.NewProc("OpenClipboard")
+	closeClipboardProc   = user32.NewProc("CloseClipboard")
+	emptyClipboardProc   = user32.NewProc("EmptyClipboard")
+	setClipboardDataProc = user32.NewProc("SetClipboardData")
+	globalAllocProc      = kernel32.NewProc("GlobalAlloc")
+	globalLockProc       = kernel32.NewProc("GlobalLock")
+	globalUnlockProc     = kernel32.NewProc("GlobalUnlock")
+
+	// Keyboard simulation
+	keybdEventProc = user32.NewProc("keybd_event")
 
 	// Shell
 	shellExecuteW  = shell32.NewProc("ShellExecuteW")
@@ -120,15 +136,24 @@ const (
 	WM_RBUTTONDOWN   = 0x0204
 	DT_CENTER        = 0x0001
 	DT_END_ELLIPSIS  = 0x00008000
+	DT_WORDBREAK     = 0x00000010
 	IDC_ARROW        = 32512
 	SWP_NOMOVE       = 0x0002
 	SWP_NOSIZE       = 0x0001
 	WM_KEYDOWN       = 0x0100
+	WM_CHAR          = 0x0102
 	VK_ESCAPE        = 0x1B
+	VK_CONTROL       = 0x11
+	VK_V             = 0x56
+	VK_RETURN        = 0x0D
 	VK_1             = 0x31
 	VK_2             = 0x32
 	VK_3             = 0x33
 	WM_USER          = 0x0400
+	CF_UNICODETEXT   = 13
+	GMEM_MOVEABLE    = 0x0002
+	KEYEVENTF_KEYUP  = 0x0002
+	SRCCOPY          = 0x00CC0020
 )
 
 // WC3 color palette

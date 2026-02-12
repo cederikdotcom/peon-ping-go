@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -17,22 +18,18 @@ import (
 
 // JSON types mirroring actionbar.go in the main package.
 type abSessionJSON struct {
-	Project   string `json:"project"`
-	State     string `json:"state"`
-	Message   string `json:"message"`
-	HWND      uint64 `json:"hwnd"`
-	UpdatedAt int64  `json:"updated_at"`
+	Project               string          `json:"project"`
+	State                 string          `json:"state"`
+	Message               string          `json:"message"`
+	HWND                  uint64          `json:"hwnd"`
+	UpdatedAt             int64           `json:"updated_at"`
+	ToolName              string          `json:"tool_name,omitempty"`
+	ToolInput             json.RawMessage `json:"tool_input,omitempty"`
+	PermissionSuggestions json.RawMessage `json:"permission_suggestions,omitempty"`
 }
 
 type abStateJSON struct {
 	Sessions map[string]abSessionJSON `json:"sessions"`
-}
-
-// Permission request file (written by peon main binary).
-type abPermReq struct {
-	ToolName  string          `json:"tool_name"`
-	ToolInput json.RawMessage `json:"tool_input"`
-	CreatedAt int64           `json:"created_at"`
 }
 
 // Permission response file (written by this action bar).
@@ -48,9 +45,10 @@ type abSlot struct {
 	State      string
 	Message    string
 	HWND       uintptr
-	HasPending bool   // has a .actionbar-req-{session}.json
+	HasPending bool   // session state is "needs approval" with tool details
 	ToolName   string // from req file
-	ToolDetail string // summary of tool_input
+	ToolDesc   string // Claude's description/reason
+	ToolDetail string // command, file path, etc.
 }
 
 // Action bar globals (for WndProc callback).
@@ -63,12 +61,15 @@ var (
 	abSelectedSessID string // session ID of selected slot (survives slot rebuilds)
 	abPendingSlots   []abSlot // written by bg goroutine, read by main thread on WM_USER
 	abBgRunning      int32    // atomic: 1 if bg goroutine is active
+	abInputText      string   // current text input buffer for send message
+	abInputActive    bool     // true when text input is visible (non-pending selected slot)
 )
 
 // Action bar dimensions.
 const (
 	abBarH      = 90
-	abOptionsH  = 80 // height of options panel above the bar
+	abOptionsH  = 200 // height of options panel above the bar
+	abOptionsW  = 600 // fixed width of the options panel
 	abSlotW     = 80
 	abIconSz    = 48
 	abMaxSlots  = 7
@@ -96,33 +97,73 @@ func abStateIcon(state string) string {
 	switch state {
 	case "done":
 		return "complete"
-	case "needs approval":
+	case "needs approval", "has question":
 		return "permission"
 	default: // "working", "ready"
 		return "idle"
 	}
 }
 
-// abToolDetail extracts a short summary from tool_input JSON.
-func abToolDetail(toolName string, raw json.RawMessage) string {
+// abNeedsAttention returns true if the state requires user attention (gold ring).
+func abNeedsAttention(state string) bool {
+	return state == "needs approval" || state == "has question"
+}
+
+// abToolInfo extracts description and detail from tool_input JSON.
+func abToolInfo(toolName string, raw json.RawMessage) (desc, detail string) {
 	if len(raw) == 0 {
-		return ""
+		return "", ""
 	}
 	var m map[string]interface{}
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return ""
+		return "", ""
 	}
-	// Try common fields in priority order.
-	for _, key := range []string{"command", "file_path", "pattern", "url", "query"} {
-		if v, ok := m[key]; ok {
+
+	// Extract description (Claude's reason for the action).
+	if v, ok := m["description"]; ok {
+		desc = fmt.Sprintf("%v", v)
+	}
+
+	// Extract the primary detail field.
+	switch toolName {
+	case "Bash":
+		if v, ok := m["command"]; ok {
+			detail = fmt.Sprintf("%v", v)
+		}
+	case "Edit":
+		if v, ok := m["file_path"]; ok {
+			detail = fmt.Sprintf("%v", v)
+		}
+		if v, ok := m["old_string"]; ok {
 			s := fmt.Sprintf("%v", v)
-			if len(s) > 60 {
-				s = s[:57] + "..."
+			if len(s) > 120 {
+				s = s[:117] + "..."
 			}
-			return s
+			detail += "\n" + s
+		}
+	case "ExitPlanMode":
+		if prompts, ok := m["allowedPrompts"]; ok {
+			if arr, ok := prompts.([]interface{}); ok {
+				var parts []string
+				for _, p := range arr {
+					if pm, ok := p.(map[string]interface{}); ok {
+						if pr, ok := pm["prompt"]; ok {
+							parts = append(parts, fmt.Sprintf("%v", pr))
+						}
+					}
+				}
+				detail = "Prompts: " + strings.Join(parts, ", ")
+			}
+		}
+	default:
+		for _, key := range []string{"command", "file_path", "pattern", "url", "query", "skill"} {
+			if v, ok := m[key]; ok {
+				detail = fmt.Sprintf("%v", v)
+				break
+			}
 		}
 	}
-	return ""
+	return desc, detail
 }
 
 // abTriggerRead kicks off a background goroutine to read state files.
@@ -142,6 +183,7 @@ func abTriggerRead() {
 }
 
 // abDoRead performs all file I/O (runs in background goroutine).
+// Returns nil on failure so abApplyPending knows to keep current state.
 func abDoRead() []abSlot {
 	data, err := os.ReadFile(abStateFile)
 	if err != nil {
@@ -160,7 +202,7 @@ func abDoRead() []abSlot {
 	now := time.Now().Unix()
 	var items []kv
 	for id, s := range state.Sessions {
-		if now-s.UpdatedAt > 600 {
+		if now-s.UpdatedAt > 600 { // 10 min safety net
 			continue
 		}
 		items = append(items, kv{id, s})
@@ -182,15 +224,39 @@ func abDoRead() []abSlot {
 			HWND:      uintptr(item.s.HWND),
 		}
 
-		// Check for req file — this is the sole source of truth for "needs action".
-		reqPath := filepath.Join(abPeonDir, ".actionbar-req-"+item.id+".json")
-		if _, err := os.Stat(reqPath); err == nil {
-			slot.HasPending = true
+		// Tool details are stored directly in the session state.
+		// Only show as pending if the hook process is still alive (heartbeat file is fresh).
+		if item.s.State == "needs approval" && item.s.ToolName != "" {
+			hbPath := filepath.Join(abPeonDir, ".actionbar-hb-"+item.id)
+			if info, err := os.Stat(hbPath); err == nil {
+				// Heartbeat exists — check if fresh (< 3 seconds old).
+				if time.Since(info.ModTime()) < 3*time.Second {
+					slot.HasPending = true
+					slot.ToolName = item.s.ToolName
+					slot.ToolDesc, slot.ToolDetail = abToolInfo(item.s.ToolName, item.s.ToolInput)
+				}
+			}
 		}
 
 		slots = append(slots, slot)
 	}
+
 	return slots
+}
+
+// abSlotsEqual checks if two slot slices are equivalent (to avoid needless repaints).
+func abSlotsEqual(a, b []abSlot) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].SessionID != b[i].SessionID || a[i].State != b[i].State ||
+			a[i].Message != b[i].Message || a[i].HasPending != b[i].HasPending ||
+			a[i].Project != b[i].Project || a[i].ToolName != b[i].ToolName {
+			return false
+		}
+	}
+	return true
 }
 
 // abApplyPending applies the result from the background read to the main thread state.
@@ -198,24 +264,32 @@ func abApplyPending() {
 	if abPendingSlots == nil {
 		return
 	}
-	abSlots = abPendingSlots
+	newSlots := abPendingSlots
 	abPendingSlots = nil
+
+	// Skip repaint if nothing changed.
+	if abSlotsEqual(abSlots, newSlots) {
+		return
+	}
+
+	abSlots = newSlots
 
 	// Restore selection by session ID.
 	abSelectedSlot = -1
 	if abSelectedSessID != "" {
 		for i, s := range abSlots {
 			if s.SessionID == abSelectedSessID {
-				if s.HasPending {
-					abSelectedSlot = i
-				} else {
-					abSelectedSessID = ""
-				}
+				abSelectedSlot = i
 				break
 			}
 		}
 		if abSelectedSlot < 0 {
 			abSelectedSessID = ""
+			abInputText = ""
+			abInputActive = false
+		} else {
+			// Update input active state based on whether slot has pending permission.
+			abInputActive = !abSlots[abSelectedSlot].HasPending
 		}
 	}
 
@@ -241,12 +315,20 @@ func primaryMonitor() RECT {
 }
 
 func abBarWidth() int {
-	// Slots + "+" button + borders.
+	// Slots + "+" button + borders. Never changes with panel state.
 	w := (len(abSlots)+1)*abSlotW + 2*borderW
 	if w < abMinW {
 		w = abMinW
 	}
 	return w
+}
+
+func abWindowWidth() int {
+	barW := abBarWidth()
+	if abSelectedSlot >= 0 && abOptionsW > barW {
+		return abOptionsW
+	}
+	return barW
 }
 
 func abTotalHeight() int {
@@ -261,12 +343,12 @@ func abResizeWindow() {
 		return
 	}
 	mon := primaryMonitor()
-	barW := abBarWidth()
+	winW := abWindowWidth()
 	totalH := abTotalHeight()
 	screenW := int(mon.Right - mon.Left)
-	x := int(mon.Left) + (screenW-barW)/2
+	x := int(mon.Left) + (screenW-winW)/2
 	y := int(mon.Bottom) - totalH - 50
-	moveWindowProc.Call(abHwnd, uintptr(x), uintptr(y), uintptr(barW), uintptr(totalH), 1)
+	moveWindowProc.Call(abHwnd, uintptr(x), uintptr(y), uintptr(winW), uintptr(totalH), 1)
 }
 
 // killExistingActionBar terminates any previously running action bar process.
@@ -292,74 +374,61 @@ func killExistingActionBar() {
 	}
 }
 
-// abLoadReqDetails reads the req file to populate tool name and detail.
-func abLoadReqDetails(slot *abSlot) {
-	reqPath := filepath.Join(abPeonDir, ".actionbar-req-"+slot.SessionID+".json")
-	data, err := os.ReadFile(reqPath)
-	if err != nil {
-		return
-	}
-	var req abPermReq
-	if json.Unmarshal(data, &req) == nil {
-		slot.ToolName = req.ToolName
-		slot.ToolDetail = abToolDetail(req.ToolName, req.ToolInput)
-	}
-}
-
-// BROWSEINFOW for SHBrowseForFolderW.
-type BROWSEINFOW struct {
-	Owner        uintptr
-	Root         uintptr
-	DisplayName  *uint16
-	Title        *uint16
-	Flags        uint32
-	Callback     uintptr
-	LParam       uintptr
-	Image        int32
-}
-
-const (
-	BIF_RETURNONLYFSDIRS = 0x0001
-	BIF_NEWDIALOGSTYLE   = 0x0040
-	MAX_PATH             = 260
-)
-
-// abLaunchNewSession opens a folder picker and launches claude in the selected folder.
+// abLaunchNewSession opens a new Windows Terminal tab with claude.
 func abLaunchNewSession() {
 	go func() {
-		// Initialize COM for this goroutine.
-		coInitializeEx.Call(0, 0)
-
-		title, _ := syscall.UTF16PtrFromString("Select project folder")
-		var displayName [MAX_PATH]uint16
-
-		bi := BROWSEINFOW{
-			Owner:       abHwnd,
-			DisplayName: &displayName[0],
-			Title:       title,
-			Flags:       BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
-		}
-
-		pidl, _, _ := shBrowseForFolderW.Call(uintptr(unsafe.Pointer(&bi)))
-		if pidl == 0 {
-			return // cancelled
-		}
-
-		var pathBuf [MAX_PATH]uint16
-		shGetPathFromIDListW.Call(pidl, uintptr(unsafe.Pointer(&pathBuf[0])))
-		winPath := syscall.UTF16ToString(pathBuf[:])
-		if winPath == "" {
-			return
-		}
-
-		// Launch Windows Terminal with wsl + claude in the selected folder.
-		// wt.exe new-tab wsl.exe --cd <winPath> -- claude
-		args := fmt.Sprintf(`new-tab wsl.exe --cd "%s" -- claude`, winPath)
 		verb, _ := syscall.UTF16PtrFromString("open")
 		exe, _ := syscall.UTF16PtrFromString("wt.exe")
-		params, _ := syscall.UTF16PtrFromString(args)
+		params, _ := syscall.UTF16PtrFromString("new-tab wsl.exe -- claude")
 		shellExecuteW.Call(0, uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(exe)), uintptr(unsafe.Pointer(params)), 0, 1)
 	}()
+}
+
+// abSendMessage copies text to clipboard, focuses the terminal window, pastes, and submits.
+// Runs in a goroutine to avoid blocking the message loop.
+func abSendMessage(text string, targetHwnd uintptr) {
+	// Convert text to UTF-16 for clipboard.
+	utf16Text, _ := syscall.UTF16FromString(text)
+	byteSize := len(utf16Text) * 2
+
+	// Copy to clipboard.
+	openClipboardProc.Call(abHwnd)
+	emptyClipboardProc.Call()
+	hMem, _, _ := globalAllocProc.Call(GMEM_MOVEABLE, uintptr(byteSize))
+	if hMem != 0 {
+		ptr, _, _ := globalLockProc.Call(hMem)
+		if ptr != 0 {
+			for i, c := range utf16Text {
+				*(*uint16)(unsafe.Pointer(ptr + uintptr(i*2))) = c
+			}
+			globalUnlockProc.Call(hMem)
+			setClipboardDataProc.Call(CF_UNICODETEXT, hMem)
+		}
+	}
+	closeClipboardProc.Call()
+
+	// Focus the terminal window.
+	if targetHwnd != 0 {
+		setForegroundWindowProc.Call(targetHwnd)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Ctrl+V to paste.
+	keybdEventProc.Call(VK_CONTROL, 0, 0, 0)
+	keybdEventProc.Call(VK_V, 0, 0, 0)
+	keybdEventProc.Call(VK_V, 0, KEYEVENTF_KEYUP, 0)
+	keybdEventProc.Call(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+	time.Sleep(50 * time.Millisecond)
+
+	// Enter to submit.
+	keybdEventProc.Call(VK_RETURN, 0, 0, 0)
+	keybdEventProc.Call(VK_RETURN, 0, KEYEVENTF_KEYUP, 0)
+
+	// Re-topmost the action bar.
+	time.Sleep(100 * time.Millisecond)
+	if abHwnd != 0 {
+		setWindowPosProc.Call(abHwnd, ^uintptr(0), 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE)
+	}
 }
 
 // abWriteResponse writes a permission response file and deselects the slot.
@@ -368,7 +437,7 @@ func abWriteResponse(behavior string, applySuggestions bool) {
 		return
 	}
 	slot := abSlots[abSelectedSlot]
-	if !slot.HasPending {
+	if slot.State != "needs approval" {
 		return
 	}
 
@@ -382,17 +451,41 @@ func abWriteResponse(behavior string, applySuggestions bool) {
 	}
 
 	rspPath := filepath.Join(abPeonDir, ".actionbar-rsp-"+slot.SessionID+".json")
-	os.WriteFile(rspPath, data, 0644)
+	targetHwnd := slot.HWND
 
 	// Deselect and mark slot as no longer pending (immediate visual feedback).
 	abSlots[abSelectedSlot].HasPending = false
 	abSelectedSlot = -1
 	abSelectedSessID = ""
+	abInputText = ""
+	abInputActive = false
 	abResizeWindow()
 	invalidateRectProc.Call(abHwnd, 0, 1)
+
+	// Remove heartbeat so the next poll doesn't restore HasPending.
+	hbPath := filepath.Join(abPeonDir, ".actionbar-hb-"+slot.SessionID)
+	os.Remove(hbPath)
+
+	// Write response file and focus terminal in background.
+	// The write must complete before focusing so the hook process picks it up.
+	go func() {
+		if err := os.WriteFile(rspPath, data, 0644); err != nil {
+			time.Sleep(100 * time.Millisecond)
+			os.WriteFile(rspPath, data, 0644)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if targetHwnd != 0 {
+			setForegroundWindowProc.Call(targetHwnd)
+		}
+	}()
 }
 
 func runActionBar(stateFile string) {
+	// CRITICAL: Lock the main goroutine to its OS thread. Win32 windows
+	// and message loops are thread-affine; without this, Go's scheduler
+	// can move us to a different thread and the message pump stops working.
+	runtime.LockOSThread()
+
 	abStateFile = stateFile
 	abPeonDir = filepath.Dir(stateFile)
 	killExistingActionBar()
@@ -416,10 +509,10 @@ func runActionBar(stateFile string) {
 
 	// Position at bottom center of primary monitor.
 	mon := primaryMonitor()
-	barW := abBarWidth()
+	winW := abWindowWidth()
 	totalH := abTotalHeight()
 	screenW := int(mon.Right - mon.Left)
-	x := int(mon.Left) + (screenW-barW)/2
+	x := int(mon.Left) + (screenW-winW)/2
 	y := int(mon.Bottom) - totalH - 50
 
 	hwnd, _, _ := createWindowExW.Call(
@@ -427,13 +520,13 @@ func runActionBar(stateFile string) {
 		uintptr(unsafe.Pointer(className)),
 		0,
 		WS_POPUP|WS_VISIBLE,
-		uintptr(x), uintptr(y), uintptr(barW), uintptr(totalH),
+		uintptr(x), uintptr(y), uintptr(winW), uintptr(totalH),
 		0, 0, hInst, 0,
 	)
 	abHwnd = hwnd
 
-	// Poll every 2 seconds (UNC file I/O can be slow).
-	setTimerProc.Call(hwnd, 1, 2000, 0)
+	// Poll every 500ms for responsive state updates.
+	setTimerProc.Call(hwnd, 1, 500, 0)
 
 	var m MSG
 	for {
@@ -459,7 +552,17 @@ func abWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	case WM_PAINT:
 		var ps PAINTSTRUCT
 		hdc, _, _ := beginPaintProc.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
-		abPaint(hdc)
+		// Double buffer: paint to off-screen bitmap, then blit.
+		w := int32(abWindowWidth())
+		h := int32(abTotalHeight())
+		memDC, _, _ := createCompatibleDC.Call(hdc)
+		memBmp, _, _ := createCompatibleBitmap.Call(hdc, uintptr(w), uintptr(h))
+		oldBmp, _, _ := selectObjectProc.Call(memDC, memBmp)
+		abPaint(memDC)
+		bitBltProc.Call(hdc, 0, 0, uintptr(w), uintptr(h), memDC, 0, 0, SRCCOPY)
+		selectObjectProc.Call(memDC, oldBmp)
+		deleteObjectProc.Call(memBmp)
+		deleteDCProc.Call(memDC)
 		endPaintProc.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		return 0
 
@@ -470,41 +573,34 @@ func abWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		barTop := totalH - abBarH
 
 		if y >= barTop {
-			// Click in slot area.
-			localX := x - borderW
+			// Click in slot area (bar is centered within window).
+			winW := abWindowWidth()
+			barW := abBarWidth()
+			barLeft := (winW - barW) / 2
+			localX := x - barLeft - borderW
 			if localX >= 0 {
 				slotIdx := localX / abSlotW
 				if slotIdx == len(abSlots) {
 					// "+" button clicked — launch new session.
 					abLaunchNewSession()
 				} else if slotIdx >= 0 && slotIdx < len(abSlots) {
-					slot := &abSlots[slotIdx]
-					if slot.HasPending {
-						// Lazy-load tool details from req file on click.
-						if slot.ToolName == "" {
-							abLoadReqDetails(slot)
-						}
-						// Toggle options panel.
-						if abSelectedSlot == slotIdx {
-							abSelectedSlot = -1
-							abSelectedSessID = ""
-						} else {
-							abSelectedSlot = slotIdx
-							abSelectedSessID = slot.SessionID
-						}
-						abResizeWindow()
-						invalidateRectProc.Call(abHwnd, 0, 1)
-						if abSelectedSlot >= 0 {
-							setForegroundWindowProc.Call(abHwnd)
-							setFocusProc.Call(abHwnd)
-						}
+					// Toggle detail panel for any slot.
+					if abSelectedSlot == slotIdx {
+						abSelectedSlot = -1
+						abSelectedSessID = ""
+						abInputText = ""
+						abInputActive = false
 					} else {
-						// No req file: focus its terminal window.
-						target := slot.HWND
-						if target != 0 {
-							setForegroundWindowProc.Call(target)
-							setWindowPosProc.Call(abHwnd, ^uintptr(0), 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE)
-						}
+						abSelectedSlot = slotIdx
+						abSelectedSessID = abSlots[slotIdx].SessionID
+						abInputText = ""
+						abInputActive = !abSlots[slotIdx].HasPending
+					}
+					abResizeWindow()
+					invalidateRectProc.Call(abHwnd, 0, 1)
+					if abSelectedSlot >= 0 {
+						setForegroundWindowProc.Call(abHwnd)
+						setFocusProc.Call(abHwnd)
 					}
 				}
 			}
@@ -514,17 +610,54 @@ func abWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case WM_KEYDOWN:
 		if abSelectedSlot >= 0 {
-			switch wParam {
-			case VK_1:
-				abWriteResponse("allow", false)
-			case VK_2:
-				abWriteResponse("allow", true)
-			case VK_3:
-				abWriteResponse("deny", false)
-			case VK_ESCAPE:
+			slot := abSlots[abSelectedSlot]
+			if slot.State == "needs approval" {
+				switch wParam {
+				case VK_1:
+					abWriteResponse("allow", false)
+				case VK_2:
+					abWriteResponse("allow", true)
+				case VK_3:
+					abWriteResponse("deny", false)
+				}
+			}
+			if wParam == VK_ESCAPE {
 				abSelectedSlot = -1
 				abSelectedSessID = ""
+				abInputText = ""
+				abInputActive = false
 				abResizeWindow()
+				invalidateRectProc.Call(abHwnd, 0, 1)
+			}
+		}
+		return 0
+
+	case WM_CHAR:
+		if abInputActive && abSelectedSlot >= 0 {
+			ch := rune(wParam)
+			switch {
+			case ch == 0x0D: // Enter — send message
+				if abInputText != "" {
+					slot := abSlots[abSelectedSlot]
+					text := abInputText
+					targetHwnd := slot.HWND
+					abInputText = ""
+					abInputActive = false
+					abSelectedSlot = -1
+					abSelectedSessID = ""
+					abResizeWindow()
+					invalidateRectProc.Call(abHwnd, 0, 1)
+					go abSendMessage(text, targetHwnd)
+				}
+			case ch == 0x08: // Backspace
+				if len(abInputText) > 0 {
+					// Remove last rune.
+					runes := []rune(abInputText)
+					abInputText = string(runes[:len(runes)-1])
+					invalidateRectProc.Call(abHwnd, 0, 1)
+				}
+			case ch >= 0x20: // Printable character
+				abInputText += string(ch)
 				invalidateRectProc.Call(abHwnd, 0, 1)
 			}
 		}
@@ -544,45 +677,48 @@ func abWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 }
 
 func abPaint(hdc uintptr) {
-	w := int32(abBarWidth())
+	winW := int32(abWindowWidth())
+	barW := int32(abBarWidth())
 	totalH := int32(abTotalHeight())
 	barTop := totalH - int32(abBarH)
 
-	// Full background fill.
-	fillRect(hdc, RECT{0, 0, w, totalH}, colorBgDark)
+	// Full background fill (transparent black for the whole window).
+	fillRect(hdc, RECT{0, 0, winW, totalH}, colorBgDark)
 
 	// --- Options panel (if a slot is selected) ---
 	if abSelectedSlot >= 0 && abSelectedSlot < len(abSlots) {
-		abPaintOptions(hdc, w, barTop)
+		abPaintOptions(hdc, winW, barTop)
 	}
 
-	// --- Bar area ---
+	// --- Bar area (centered within the window) ---
+	barLeft := (winW - barW) / 2
+	barRight := barLeft + barW
 	barBottom := totalH
 
 	// Beveled gold border around the bar.
-	fillRect(hdc, RECT{0, barTop, w, barTop + borderW}, colorBorderLight)
-	fillRect(hdc, RECT{0, barTop, borderW, barBottom}, colorBorderLight)
-	fillRect(hdc, RECT{0, barBottom - borderW, w, barBottom}, colorBorderShadow)
-	fillRect(hdc, RECT{w - borderW, barTop, w, barBottom}, colorBorderShadow)
+	fillRect(hdc, RECT{barLeft, barTop, barRight, barTop + borderW}, colorBorderLight)
+	fillRect(hdc, RECT{barLeft, barTop, barLeft + borderW, barBottom}, colorBorderLight)
+	fillRect(hdc, RECT{barLeft, barBottom - borderW, barRight, barBottom}, colorBorderShadow)
+	fillRect(hdc, RECT{barRight - borderW, barTop, barRight, barBottom}, colorBorderShadow)
 
 	// Inner highlight.
-	drawLine(hdc, borderW, barTop+borderW, w-borderW, barTop+borderW, colorBorderGold)
-	drawLine(hdc, borderW, barTop+borderW, borderW, barBottom-borderW, colorBorderGold)
-	drawLine(hdc, borderW, barBottom-borderW-1, w-borderW, barBottom-borderW-1, colorBorderShadow)
-	drawLine(hdc, w-borderW-1, barTop+borderW, w-borderW-1, barBottom-borderW, colorBorderShadow)
+	drawLine(hdc, barLeft+borderW, barTop+borderW, barRight-borderW, barTop+borderW, colorBorderGold)
+	drawLine(hdc, barLeft+borderW, barTop+borderW, barLeft+borderW, barBottom-borderW, colorBorderGold)
+	drawLine(hdc, barLeft+borderW, barBottom-borderW-1, barRight-borderW, barBottom-borderW-1, colorBorderShadow)
+	drawLine(hdc, barRight-borderW-1, barTop+borderW, barRight-borderW-1, barBottom-borderW, colorBorderShadow)
 
 	// Render session slots.
 	setBkModeProc.Call(hdc, TRANSPARENT)
 	fontName, _ := syscall.UTF16PtrFromString("Segoe UI")
 
 	for i, slot := range abSlots {
-		sx := int32(borderW + i*abSlotW)
+		sx := barLeft + int32(borderW+i*abSlotW)
 		slotTop := barTop + borderW + 1
 
 		isSelected := i == abSelectedSlot
 
-		// Req file = needs action. No req file = idle.
-		if slot.HasPending {
+		attention := slot.HasPending || abNeedsAttention(slot.State)
+		if attention {
 			// Gold ring — action needed.
 			ringColor := uintptr(colorGoldRing)
 			if isSelected {
@@ -594,21 +730,20 @@ func abPaint(hdc uintptr) {
 			fillRect(hdc, RECT{sx + int32(abSlotW) - abFrameW, slotTop, sx + int32(abSlotW), barBottom - borderW}, ringColor)
 			drawLine(hdc, sx+abFrameW, slotTop+abFrameW, sx+int32(abSlotW)-abFrameW, slotTop+abFrameW, colorGoldRingOuter)
 		} else {
-			// No req file — dimmed/idle.
+			// Dimmed/idle.
 			fillRect(hdc, RECT{sx, slotTop, sx + int32(abSlotW), barBottom - borderW}, colorSlotDimBg)
 		}
 
 		// Icon (48x48, centered in slot).
+		// Working = night elf, idle/pending = peon.
 		iconX := int(sx) + (abSlotW-abIconSz)/2
 		iconY := int(slotTop) + 10
-		if slot.HasPending {
-			if img, ok := gdipImages["permission"]; ok {
-				drawIcon(hdc, img, iconX, iconY, abIconSz)
-			}
-		} else {
-			if img, ok := gdipImages["idle"]; ok {
-				drawIcon(hdc, img, iconX, iconY, abIconSz)
-			}
+		iconKey := "idle"
+		if slot.State == "working" {
+			iconKey = "complete"
+		}
+		if img, ok := gdipImages[iconKey]; ok {
+			drawIcon(hdc, img, iconX, iconY, abIconSz)
 		}
 
 		// Slot number in top-left corner.
@@ -621,7 +756,7 @@ func abPaint(hdc uintptr) {
 			uintptr(unsafe.Pointer(fontName)),
 		)
 		oldFont, _, _ := selectObjectProc.Call(hdc, numFont)
-		if slot.HasPending {
+		if attention {
 			setTextColorProc.Call(hdc, colorTextGold)
 		} else {
 			setTextColorProc.Call(hdc, colorTextDim)
@@ -642,7 +777,7 @@ func abPaint(hdc uintptr) {
 			uintptr(unsafe.Pointer(fontName)),
 		)
 		oldFont2, _, _ := selectObjectProc.Call(hdc, textFont)
-		if slot.HasPending {
+		if attention {
 			setTextColorProc.Call(hdc, colorTextGold)
 		} else {
 			setTextColorProc.Call(hdc, colorTextDim)
@@ -668,7 +803,7 @@ func abPaint(hdc uintptr) {
 
 	// "+" button after the last slot.
 	{
-		plusX := int32(borderW + len(abSlots)*abSlotW)
+		plusX := barLeft + int32(borderW+len(abSlots)*abSlotW)
 		slotTop := barTop + borderW + 1
 
 		// Separator before "+".
@@ -715,77 +850,186 @@ func abPaintOptions(hdc uintptr, w, barTop int32) {
 
 	setBkModeProc.Call(hdc, TRANSPARENT)
 	fontName, _ := syscall.UTF16PtrFromString("Segoe UI")
+	monoName, _ := syscall.UTF16PtrFromString("Consolas")
 	pad := int32(borderW + 8)
+	y := optTop + borderW + 6
 
-	// Tool name + detail line (white, bold).
-	toolText := slot.ToolName
-	if slot.ToolDetail != "" {
-		toolText += ": " + slot.ToolDetail
-	}
-	// Truncate if too long.
-	if len(toolText) > 70 {
-		toolText = toolText[:67] + "..."
-	}
+	if slot.HasPending {
+		// --- Permission request detail ---
 
-	toolSize := int32(-15)
-	toolFont, _, _ := createFontW.Call(
-		uintptr(toolSize),
-		0, 0, 0,
-		FW_BOLD, 0, 0, 0,
-		DEFAULT_CHARSET, 0, 0, 0, 0,
-		uintptr(unsafe.Pointer(fontName)),
-	)
-	oldFont, _, _ := selectObjectProc.Call(hdc, toolFont)
-	setTextColorProc.Call(hdc, colorTextWhite)
-
-	toolStr, _ := syscall.UTF16PtrFromString(toolText)
-	toolRC := RECT{pad, optTop + borderW + 6, w - pad, optTop + borderW + 28}
-	drawTextProc.Call(hdc, uintptr(unsafe.Pointer(toolStr)), ^uintptr(0), uintptr(unsafe.Pointer(&toolRC)), DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS)
-	selectObjectProc.Call(hdc, oldFont)
-	deleteObjectProc.Call(toolFont)
-
-	// Message line if available.
-	msgY := optTop + borderW + 28
-	if slot.Message != "" {
-		msgSize := int32(-12)
-		msgFont, _, _ := createFontW.Call(
-			uintptr(msgSize),
-			0, 0, 0,
-			0, 0, 0, 0,
+		// Line 1: Project + Tool name (gold, bold).
+		headerText := slot.Project + " — " + slot.ToolName
+		headerSize := int32(-16)
+		headerFont, _, _ := createFontW.Call(
+			uintptr(headerSize), 0, 0, 0, FW_BOLD, 0, 0, 0,
 			DEFAULT_CHARSET, 0, 0, 0, 0,
 			uintptr(unsafe.Pointer(fontName)),
 		)
-		oldMsgFont, _, _ := selectObjectProc.Call(hdc, msgFont)
-		setTextColorProc.Call(hdc, colorTextDim)
-		msgStr, _ := syscall.UTF16PtrFromString(slot.Message)
-		msgRC := RECT{pad, msgY, w - pad, msgY + 16}
-		drawTextProc.Call(hdc, uintptr(unsafe.Pointer(msgStr)), ^uintptr(0), uintptr(unsafe.Pointer(&msgRC)), DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS)
-		selectObjectProc.Call(hdc, oldMsgFont)
-		deleteObjectProc.Call(msgFont)
-		msgY += 16
+		oldFont, _, _ := selectObjectProc.Call(hdc, headerFont)
+		setTextColorProc.Call(hdc, colorTextGold)
+		headerStr, _ := syscall.UTF16PtrFromString(headerText)
+		headerRC := RECT{pad, y, w - pad, y + 22}
+		drawTextProc.Call(hdc, uintptr(unsafe.Pointer(headerStr)), ^uintptr(0), uintptr(unsafe.Pointer(&headerRC)), DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS)
+		selectObjectProc.Call(hdc, oldFont)
+		deleteObjectProc.Call(headerFont)
+		y += 24
+
+		// Line 2: Description (white, normal) — Claude's reason.
+		if slot.ToolDesc != "" {
+			descSize := int32(-14)
+			descFont, _, _ := createFontW.Call(
+				uintptr(descSize), 0, 0, 0, 0, 0, 0, 0,
+				DEFAULT_CHARSET, 0, 0, 0, 0,
+				uintptr(unsafe.Pointer(fontName)),
+			)
+			oldDescFont, _, _ := selectObjectProc.Call(hdc, descFont)
+			setTextColorProc.Call(hdc, colorTextWhite)
+			descStr, _ := syscall.UTF16PtrFromString(slot.ToolDesc)
+			descRC := RECT{pad, y, w - pad, y + 40}
+			drawTextProc.Call(hdc, uintptr(unsafe.Pointer(descStr)), ^uintptr(0), uintptr(unsafe.Pointer(&descRC)), DT_LEFT|DT_WORDBREAK|DT_END_ELLIPSIS)
+			selectObjectProc.Call(hdc, oldDescFont)
+			deleteObjectProc.Call(descFont)
+			y += 22
+		}
+
+		// Separator line between description and detail.
+		if slot.ToolDetail != "" {
+			drawLine(hdc, pad, y, w-pad, y, colorBorderShadow)
+			y += 4
+		}
+
+		// Lines 3+: Tool detail (monospace, dimmer, with word wrap).
+		if slot.ToolDetail != "" {
+			detailSize := int32(-13)
+			detailFont, _, _ := createFontW.Call(
+				uintptr(detailSize), 0, 0, 0, 0, 0, 0, 0,
+				DEFAULT_CHARSET, 0, 0, 0, 0,
+				uintptr(unsafe.Pointer(monoName)),
+			)
+			oldDetailFont, _, _ := selectObjectProc.Call(hdc, detailFont)
+			setTextColorProc.Call(hdc, 0x00B0B0A0) // light gray-green
+			detailStr, _ := syscall.UTF16PtrFromString(slot.ToolDetail)
+			detailRC := RECT{pad, y, w - pad, optBottom - 30}
+			drawTextProc.Call(hdc, uintptr(unsafe.Pointer(detailStr)), ^uintptr(0), uintptr(unsafe.Pointer(&detailRC)), DT_LEFT|DT_WORDBREAK|DT_END_ELLIPSIS)
+			selectObjectProc.Call(hdc, oldDetailFont)
+			deleteObjectProc.Call(detailFont)
+		}
+
+		// Action buttons line at the bottom of the options panel (gold text).
+		actionsY := optBottom - 26
+		optSize := int32(-14)
+		optFont, _, _ := createFontW.Call(
+			uintptr(optSize), 0, 0, 0, FW_BOLD, 0, 0, 0,
+			DEFAULT_CHARSET, 0, 0, 0, 0,
+			uintptr(unsafe.Pointer(fontName)),
+		)
+		oldOptFont, _, _ := selectObjectProc.Call(hdc, optFont)
+		setTextColorProc.Call(hdc, colorOptionsKey)
+		actionsStr, _ := syscall.UTF16PtrFromString("[1] Allow    [2] Always Allow    [3] Deny")
+		actRC := RECT{pad, actionsY, w - pad, actionsY + 20}
+		drawTextProc.Call(hdc, uintptr(unsafe.Pointer(actionsStr)), ^uintptr(0), uintptr(unsafe.Pointer(&actRC)), DT_LEFT|DT_SINGLELINE)
+		selectObjectProc.Call(hdc, oldOptFont)
+		deleteObjectProc.Call(optFont)
+	} else {
+		// --- Session info (no pending permission) ---
+
+		// Reserve space for the text input at the bottom.
+		inputH := int32(30)
+		inputPadY := int32(6)
+		contentBottom := optBottom - inputH - inputPadY*2
+
+		// Line 1: Project name (gold, bold).
+		headerSize := int32(-18)
+		headerFont, _, _ := createFontW.Call(
+			uintptr(headerSize), 0, 0, 0, FW_BOLD, 0, 0, 0,
+			DEFAULT_CHARSET, 0, 0, 0, 0,
+			uintptr(unsafe.Pointer(fontName)),
+		)
+		oldFont, _, _ := selectObjectProc.Call(hdc, headerFont)
+		setTextColorProc.Call(hdc, colorTextGold)
+		headerStr, _ := syscall.UTF16PtrFromString(slot.Project)
+		headerRC := RECT{pad, y, w - pad, y + 24}
+		drawTextProc.Call(hdc, uintptr(unsafe.Pointer(headerStr)), ^uintptr(0), uintptr(unsafe.Pointer(&headerRC)), DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS)
+		selectObjectProc.Call(hdc, oldFont)
+		deleteObjectProc.Call(headerFont)
+		y += 28
+
+		// Line 2: Status (white).
+		stateText := "Status: " + slot.State
+		stateSize := int32(-15)
+		stateFont, _, _ := createFontW.Call(
+			uintptr(stateSize), 0, 0, 0, 0, 0, 0, 0,
+			DEFAULT_CHARSET, 0, 0, 0, 0,
+			uintptr(unsafe.Pointer(fontName)),
+		)
+		oldStateFont, _, _ := selectObjectProc.Call(hdc, stateFont)
+		setTextColorProc.Call(hdc, colorTextWhite)
+		stateStr, _ := syscall.UTF16PtrFromString(stateText)
+		stateRC := RECT{pad, y, w - pad, y + 20}
+		drawTextProc.Call(hdc, uintptr(unsafe.Pointer(stateStr)), ^uintptr(0), uintptr(unsafe.Pointer(&stateRC)), DT_LEFT|DT_SINGLELINE)
+		selectObjectProc.Call(hdc, oldStateFont)
+		deleteObjectProc.Call(stateFont)
+		y += 24
+
+		// Lines 3+: Last message (dimmer, with word wrap).
+		if slot.Message != "" {
+			drawLine(hdc, pad, y, w-pad, y, colorBorderShadow)
+			y += 4
+
+			msgSize := int32(-13)
+			msgFont, _, _ := createFontW.Call(
+				uintptr(msgSize), 0, 0, 0, 0, 0, 0, 0,
+				DEFAULT_CHARSET, 0, 0, 0, 0,
+				uintptr(unsafe.Pointer(monoName)),
+			)
+			oldMsgFont, _, _ := selectObjectProc.Call(hdc, msgFont)
+			setTextColorProc.Call(hdc, 0x00B0B0A0) // light gray-green
+			msgStr, _ := syscall.UTF16PtrFromString(slot.Message)
+			msgRC := RECT{pad, y, w - pad, contentBottom}
+			drawTextProc.Call(hdc, uintptr(unsafe.Pointer(msgStr)), ^uintptr(0), uintptr(unsafe.Pointer(&msgRC)), DT_LEFT|DT_WORDBREAK|DT_END_ELLIPSIS)
+			selectObjectProc.Call(hdc, oldMsgFont)
+			deleteObjectProc.Call(msgFont)
+		}
+
+		// --- Text input field at the bottom ---
+		inputLeft := pad
+		inputRight := w - pad
+		inputTop := optBottom - inputH - inputPadY
+		inputBottom := optBottom - inputPadY
+
+		// Input field background (dark).
+		fillRect(hdc, RECT{inputLeft, inputTop, inputRight, inputBottom}, colorSlotDimBg)
+
+		// Gold border around input.
+		drawLine(hdc, inputLeft, inputTop, inputRight, inputTop, colorBorderGold)
+		drawLine(hdc, inputLeft, inputBottom, inputRight, inputBottom, colorBorderGold)
+		drawLine(hdc, inputLeft, inputTop, inputLeft, inputBottom, colorBorderGold)
+		drawLine(hdc, inputRight-1, inputTop, inputRight-1, inputBottom, colorBorderGold)
+
+		// Input text (or placeholder).
+		inputFontSize := int32(-14)
+		inputFont, _, _ := createFontW.Call(
+			uintptr(inputFontSize), 0, 0, 0, 0, 0, 0, 0,
+			DEFAULT_CHARSET, 0, 0, 0, 0,
+			uintptr(unsafe.Pointer(monoName)),
+		)
+		oldInputFont, _, _ := selectObjectProc.Call(hdc, inputFont)
+		textRC := RECT{inputLeft + 6, inputTop + 2, inputRight - 6, inputBottom - 2}
+		if abInputText == "" {
+			setTextColorProc.Call(hdc, colorTextDim)
+			placeholder, _ := syscall.UTF16PtrFromString("Send message...")
+			drawTextProc.Call(hdc, uintptr(unsafe.Pointer(placeholder)), ^uintptr(0), uintptr(unsafe.Pointer(&textRC)), DT_LEFT|DT_VCENTER|DT_SINGLELINE)
+		} else {
+			setTextColorProc.Call(hdc, colorTextWhite)
+			// Show text with blinking cursor.
+			cursorChar := "|"
+			if (time.Now().UnixMilli()/500)%2 == 0 {
+				cursorChar = ""
+			}
+			inputStr, _ := syscall.UTF16PtrFromString(abInputText + cursorChar)
+			drawTextProc.Call(hdc, uintptr(unsafe.Pointer(inputStr)), ^uintptr(0), uintptr(unsafe.Pointer(&textRC)), DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
+		}
+		selectObjectProc.Call(hdc, oldInputFont)
+		deleteObjectProc.Call(inputFont)
 	}
-
-	// Action buttons line (gold text).
-	actionsY := msgY + 4
-	optSize := int32(-14)
-	optFont, _, _ := createFontW.Call(
-		uintptr(optSize),
-		0, 0, 0,
-		FW_BOLD, 0, 0, 0,
-		DEFAULT_CHARSET, 0, 0, 0, 0,
-		uintptr(unsafe.Pointer(fontName)),
-	)
-	oldOptFont, _, _ := selectObjectProc.Call(hdc, optFont)
-	setTextColorProc.Call(hdc, colorOptionsKey)
-
-	// Build actions string with brackets.
-	var actions []string
-	actions = append(actions, "[1] Allow")
-	actions = append(actions, "[2] Always Allow")
-	actions = append(actions, "[3] Deny")
-	actionsStr, _ := syscall.UTF16PtrFromString(strings.Join(actions, "    "))
-	actRC := RECT{pad, actionsY, w - pad, actionsY + 20}
-	drawTextProc.Call(hdc, uintptr(unsafe.Pointer(actionsStr)), ^uintptr(0), uintptr(unsafe.Pointer(&actRC)), DT_LEFT|DT_SINGLELINE)
-	selectObjectProc.Call(hdc, oldOptFont)
-	deleteObjectProc.Call(optFont)
 }

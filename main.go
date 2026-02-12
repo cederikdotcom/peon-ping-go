@@ -11,14 +11,6 @@ import (
 	"time"
 )
 
-// permissionReqFile is the request file written by peon for the action bar to read.
-type permissionReqFile struct {
-	ToolName              string          `json:"tool_name"`
-	ToolInput             json.RawMessage `json:"tool_input"`
-	PermissionSuggestions json.RawMessage `json:"permission_suggestions,omitempty"`
-	CreatedAt             int64           `json:"created_at"`
-}
-
 // permissionRspFile is the response file written by the action bar helper.
 type permissionRspFile struct {
 	Behavior         string `json:"behavior"` // "allow" or "deny"
@@ -40,8 +32,9 @@ type hookDecision struct {
 	UpdatedPermissions json.RawMessage `json:"updatedPermissions,omitempty"`
 }
 
-// handlePermissionRequest handles PermissionRequest hook events by writing a request file
-// for the action bar and polling for a response. Falls back to terminal dialog on timeout.
+// handlePermissionRequest handles PermissionRequest hook events by updating
+// the action bar state and polling for a response file. Falls back to terminal
+// dialog on timeout.
 func handlePermissionRequest(peonDir string, raw []byte) {
 	var payload struct {
 		SessionID             string          `json:"session_id"`
@@ -53,31 +46,31 @@ func handlePermissionRequest(peonDir string, raw []byte) {
 		os.Exit(0)
 	}
 
-	reqPath := filepath.Join(peonDir, ".actionbar-req-"+payload.SessionID+".json")
 	rspPath := filepath.Join(peonDir, ".actionbar-rsp-"+payload.SessionID+".json")
+	heartbeatPath := filepath.Join(peonDir, ".actionbar-hb-"+payload.SessionID)
 
 	// Clean up any stale response file.
 	os.Remove(rspPath)
 
-	// Write request file for the action bar to pick up.
-	req := permissionReqFile{
-		ToolName:              payload.ToolName,
-		ToolInput:             payload.ToolInput,
-		PermissionSuggestions: payload.PermissionSuggestions,
-		CreatedAt:             time.Now().Unix(),
-	}
-	reqData, err := json.Marshal(req)
-	if err != nil {
-		os.Exit(0)
-	}
-	if err := os.WriteFile(reqPath, reqData, 0644); err != nil {
-		os.Exit(0)
-	}
+	// Update action bar state with "needs approval" + tool details (single source of truth).
+	updateActionBarPermission(peonDir, payload.SessionID, payload.ToolName, payload.ToolInput, payload.PermissionSuggestions)
+
+	// Create heartbeat file so the helper knows we're alive and polling.
+	// On exit (clean or killed), clear the permission state back to "working".
+	os.WriteFile(heartbeatPath, nil, 0644)
+	defer func() {
+		os.Remove(heartbeatPath)
+		clearActionBarPermission(peonDir, payload.SessionID)
+	}()
 
 	// Poll for response file (500ms intervals, up to 5 minutes).
 	deadline := time.Now().Add(5 * time.Minute)
 	for time.Now().Before(deadline) {
 		time.Sleep(500 * time.Millisecond)
+
+		// Touch heartbeat so the helper knows we're still alive.
+		now := time.Now()
+		os.Chtimes(heartbeatPath, now, now)
 
 		rspData, err := os.ReadFile(rspPath)
 		if err != nil {
@@ -89,9 +82,9 @@ func handlePermissionRequest(peonDir string, raw []byte) {
 			continue
 		}
 
-		// Clean up both files.
-		os.Remove(reqPath)
+		// Clean up response file and update action bar to "working".
 		os.Remove(rspPath)
+		clearActionBarPermission(peonDir, payload.SessionID)
 
 		// Build and output the hook response.
 		decision := hookDecision{
@@ -112,8 +105,7 @@ func handlePermissionRequest(peonDir string, raw []byte) {
 		os.Exit(0)
 	}
 
-	// Timeout: clean up request file, exit 0 to fall through to terminal dialog.
-	os.Remove(reqPath)
+	// Timeout: exit 0 to fall through to terminal dialog.
 	os.Exit(0)
 }
 
@@ -138,6 +130,19 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Debug dump: write raw stdin JSON for Stop events to inspect full payload.
+	{
+		var probe struct {
+			HookEventName string `json:"hook_event_name"`
+		}
+		json.Unmarshal(input, &probe)
+		if probe.HookEventName == "Stop" {
+			ts := time.Now().UnixMilli()
+			debugPath := filepath.Join(peonDir, fmt.Sprintf(".hook-debug-%d.json", ts))
+			os.WriteFile(debugPath, input, 0644)
+		}
+	}
+
 	// Early intercept: PermissionRequest hook gets special blocking handling.
 	var probe struct {
 		HookEventName string `json:"hook_event_name"`
@@ -153,6 +158,12 @@ func main() {
 	adapter := detectAdapter(json.RawMessage(input), forceHarness)
 	event, err := adapter.Parse(json.RawMessage(input))
 	if err != nil || event.Type == "" {
+		os.Exit(0)
+	}
+
+	// Session end: remove from action bar and exit.
+	if event.Type == "session_end" {
+		removeActionBarSession(peonDir, event.SessionID)
 		os.Exit(0)
 	}
 
