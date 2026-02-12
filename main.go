@@ -144,6 +144,11 @@ func main() {
 		fmt.Printf("\033]0;%s\007", title)
 	}
 
+	// Update action bar state.
+	if event.SessionID != "" && route.Status != "" {
+		writeActionBarSession(peonDir, event.SessionID, project, route.Status, targetHwnd)
+	}
+
 	// Play sound and/or notify.
 	if !paused {
 		if soundFile != "" && fileExists(soundFile) && route.Notify {

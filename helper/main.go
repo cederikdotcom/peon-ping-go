@@ -46,9 +46,12 @@ var (
 	postMessageW        = user32.NewProc("PostMessageW")
 	destroyWindowProc   = user32.NewProc("DestroyWindow")
 	setTimerProc        = user32.NewProc("SetTimer")
-	getForegroundWindow = user32.NewProc("GetForegroundWindow")
-	getWindowRect       = user32.NewProc("GetWindowRect")
-	getModuleHandleW    = kernel32.NewProc("GetModuleHandleW")
+	getForegroundWindow     = user32.NewProc("GetForegroundWindow")
+	setForegroundWindowProc = user32.NewProc("SetForegroundWindow")
+	invalidateRectProc      = user32.NewProc("InvalidateRect")
+	moveWindowProc          = user32.NewProc("MoveWindow")
+	getWindowRect           = user32.NewProc("GetWindowRect")
+	getModuleHandleW        = kernel32.NewProc("GetModuleHandleW")
 
 	// DPI
 	setProcessDPIAware = user32.NewProc("SetProcessDPIAware")
@@ -102,6 +105,10 @@ const (
 	DEFAULT_CHARSET  = 1
 	PS_SOLID         = 0
 	PROCESS_TERMINATE = 0x0001
+	WM_LBUTTONDOWN   = 0x0201
+	WM_RBUTTONDOWN   = 0x0204
+	DT_CENTER        = 0x0001
+	DT_END_ELLIPSIS  = 0x00008000
 )
 
 // WC3 color palette
@@ -184,7 +191,7 @@ func main() {
 	initGDIPlus()
 
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: peon-helper.exe <play|notify|both|hwnd|dismiss> ...")
+		fmt.Fprintln(os.Stderr, "Usage: peon-helper.exe <play|notify|both|hwnd|dismiss|actionbar> ...")
 		os.Exit(1)
 	}
 
@@ -225,6 +232,14 @@ func main() {
 		mci("play peon")
 		showNotification(os.Args[4], os.Args[5], os.Args[6], targetHwnd)
 		mci("close peon")
+
+	case "actionbar":
+		// actionbar <state-file>
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: peon-helper.exe actionbar <state-file>")
+			os.Exit(1)
+		}
+		runActionBar(os.Args[2])
 	}
 
 	shutdownGDIPlus()

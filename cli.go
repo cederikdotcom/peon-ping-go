@@ -52,6 +52,12 @@ func runCLI(peonDir string, args []string) {
 		}
 		os.Exit(0)
 
+	case "--actionbar":
+		abFile := toWindowsPath(actionBarPath(peonDir))
+		detach("actionbar", abFile)
+		fmt.Println("peon-ping: action bar launched")
+		os.Exit(0)
+
 	case "--status":
 		if _, err := os.Stat(pausedFile); err == nil {
 			fmt.Println("peon-ping: paused")
@@ -181,6 +187,7 @@ Commands:
   --toggle          Toggle mute on/off
   --status          Check if paused or active
   --dismiss         Close all hanging notification windows
+  --actionbar       Launch the persistent action bar
   --packs           List available sound packs
   --pack <name>     Switch to a specific pack
   --pack            Cycle to the next pack
