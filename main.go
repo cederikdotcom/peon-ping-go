@@ -56,12 +56,9 @@ func handlePermissionRequest(peonDir string, raw []byte) {
 	updateActionBarPermission(peonDir, payload.SessionID, payload.ToolName, payload.ToolInput, payload.PermissionSuggestions)
 
 	// Create heartbeat file so the helper knows we're alive and polling.
-	// On exit (clean or killed), clear the permission state back to "working".
+	// Note: os.Exit and process kills don't run defers, so the helper
+	// uses the heartbeat staleness to detect in-terminal handling.
 	os.WriteFile(heartbeatPath, nil, 0644)
-	defer func() {
-		os.Remove(heartbeatPath)
-		clearActionBarPermission(peonDir, payload.SessionID)
-	}()
 
 	// Poll for response file (500ms intervals, up to 5 minutes).
 	deadline := time.Now().Add(5 * time.Minute)

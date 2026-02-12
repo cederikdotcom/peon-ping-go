@@ -224,17 +224,22 @@ func abDoRead() []abSlot {
 			HWND:      uintptr(item.s.HWND),
 		}
 
-		// Tool details are stored directly in the session state.
-		// Only show as pending if the hook process is still alive (heartbeat file is fresh).
-		if item.s.State == "needs approval" && item.s.ToolName != "" {
+		// For "needs approval" state, check heartbeat to see if the hook process
+		// is still alive. If stale/missing, the permission was handled in-terminal
+		// — override the state to "working" visually.
+		if item.s.State == "needs approval" {
 			hbPath := filepath.Join(abPeonDir, ".actionbar-hb-"+item.id)
+			hbFresh := false
 			if info, err := os.Stat(hbPath); err == nil {
-				// Heartbeat exists — check if fresh (< 3 seconds old).
-				if time.Since(info.ModTime()) < 3*time.Second {
-					slot.HasPending = true
-					slot.ToolName = item.s.ToolName
-					slot.ToolDesc, slot.ToolDetail = abToolInfo(item.s.ToolName, item.s.ToolInput)
-				}
+				hbFresh = time.Since(info.ModTime()) < 3*time.Second
+			}
+			if hbFresh && item.s.ToolName != "" {
+				slot.HasPending = true
+				slot.ToolName = item.s.ToolName
+				slot.ToolDesc, slot.ToolDetail = abToolInfo(item.s.ToolName, item.s.ToolInput)
+			} else if !hbFresh {
+				// Hook process is dead — permission was handled in-terminal.
+				slot.State = "working"
 			}
 		}
 
