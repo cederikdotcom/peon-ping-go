@@ -126,6 +126,21 @@ func abReadState() {
 	}
 }
 
+// primaryMonitor returns the monitor containing (0,0), which is the
+// Windows primary monitor. Falls back to first monitor.
+func primaryMonitor() RECT {
+	monitors := getMonitors()
+	for _, mon := range monitors {
+		if mon.Left <= 0 && mon.Right > 0 && mon.Top <= 0 && mon.Bottom > 0 {
+			return mon
+		}
+	}
+	if len(monitors) > 0 {
+		return monitors[0]
+	}
+	return RECT{0, 0, 1920, 1080}
+}
+
 func abBarWidth() int {
 	w := len(abSlots)*abSlotW + 2*borderW
 	if w < abMinW {
@@ -138,11 +153,7 @@ func abResizeWindow() {
 	if abHwnd == 0 {
 		return
 	}
-	monitors := getMonitors()
-	if len(monitors) == 0 {
-		return
-	}
-	mon := monitors[0]
+	mon := primaryMonitor()
 	barW := abBarWidth()
 	screenW := int(mon.Right - mon.Left)
 	x := int(mon.Left) + (screenW-barW)/2
@@ -183,21 +194,19 @@ func runActionBar(stateFile string) {
 	className, _ := syscall.UTF16PtrFromString("PeonActionBar")
 	hInst, _, _ := getModuleHandleW.Call(0)
 
+	cursor, _, _ := loadCursorW.Call(0, IDC_ARROW)
 	wc := WNDCLASSEX{
 		Size:      uint32(unsafe.Sizeof(WNDCLASSEX{})),
 		Style:     CS_HREDRAW | CS_VREDRAW,
 		WndProc:   syscall.NewCallback(abWndProc),
 		Instance:  hInst,
+		Cursor:    cursor,
 		ClassName: className,
 	}
 	registerClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
 	// Position at bottom center of primary monitor.
-	monitors := getMonitors()
-	if len(monitors) == 0 {
-		return
-	}
-	mon := monitors[0]
+	mon := primaryMonitor()
 	barW := abBarWidth()
 	screenW := int(mon.Right - mon.Left)
 	x := int(mon.Left) + (screenW-barW)/2
@@ -245,8 +254,11 @@ func abWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		if x >= borderW {
 			slotIdx := (x - borderW) / abSlotW
 			if slotIdx >= 0 && slotIdx < len(abSlots) {
-				if abSlots[slotIdx].HWND != 0 {
-					setForegroundWindowProc.Call(abSlots[slotIdx].HWND)
+				target := abSlots[slotIdx].HWND
+				if target != 0 {
+					setForegroundWindowProc.Call(target)
+					// Re-assert topmost so the bar stays visible above the terminal.
+					setWindowPosProc.Call(abHwnd, ^uintptr(0), 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE)
 				}
 			}
 		}

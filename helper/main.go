@@ -51,6 +51,8 @@ var (
 	invalidateRectProc      = user32.NewProc("InvalidateRect")
 	moveWindowProc          = user32.NewProc("MoveWindow")
 	getWindowRect           = user32.NewProc("GetWindowRect")
+	loadCursorW             = user32.NewProc("LoadCursorW")
+	setWindowPosProc        = user32.NewProc("SetWindowPos")
 	getModuleHandleW        = kernel32.NewProc("GetModuleHandleW")
 
 	// DPI
@@ -109,6 +111,9 @@ const (
 	WM_RBUTTONDOWN   = 0x0204
 	DT_CENTER        = 0x0001
 	DT_END_ELLIPSIS  = 0x00008000
+	IDC_ARROW        = 32512
+	SWP_NOMOVE       = 0x0002
+	SWP_NOSIZE       = 0x0001
 )
 
 // WC3 color palette
