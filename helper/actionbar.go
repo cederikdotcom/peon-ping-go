@@ -63,6 +63,7 @@ var (
 	abBgRunning      int32    // atomic: 1 if bg goroutine is active
 	abInputText      string   // current text input buffer for send message
 	abInputActive    bool     // true when text input is visible (non-pending selected slot)
+	abMinimized      bool     // true when bar is collapsed to tiny pill indicator
 )
 
 // Action bar dimensions.
@@ -75,6 +76,9 @@ const (
 	abMaxSlots  = 7
 	abMinW      = 200
 	abFrameW    = 3 // gold frame thickness around pending icons
+	abMinBtnW   = 30 // width of minimize button at right end of bar
+	abMinPillW  = 50 // width of minimized indicator pill
+	abMinPillH  = 24 // height of minimized indicator pill
 )
 
 // WoW-style colors (BGR format).
@@ -308,8 +312,8 @@ func primaryMonitor() RECT {
 }
 
 func abBarWidth() int {
-	// Slots + "+" button + borders. Never changes with panel state.
-	w := (len(abSlots)+1)*abSlotW + 2*borderW
+	// Slots + "+" button + minimize button + borders.
+	w := (len(abSlots)+1)*abSlotW + abMinBtnW + 2*borderW
 	if w < abMinW {
 		w = abMinW
 	}
@@ -317,6 +321,9 @@ func abBarWidth() int {
 }
 
 func abWindowWidth() int {
+	if abMinimized {
+		return abMinPillW
+	}
 	barW := abBarWidth()
 	if abSelectedSlot >= 0 && abOptionsW > barW {
 		return abOptionsW
@@ -325,6 +332,9 @@ func abWindowWidth() int {
 }
 
 func abTotalHeight() int {
+	if abMinimized {
+		return abMinPillH
+	}
 	if abSelectedSlot >= 0 {
 		return abBarH + abOptionsH
 	}
@@ -560,6 +570,14 @@ func abWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		return 0
 
 	case WM_LBUTTONDOWN:
+		// If minimized, any click restores the full bar.
+		if abMinimized {
+			abMinimized = false
+			abResizeWindow()
+			invalidateRectProc.Call(abHwnd, 0, 1)
+			return 0
+		}
+
 		x := int(int16(lParam & 0xFFFF))
 		y := int(int16((lParam >> 16) & 0xFFFF))
 		totalH := abTotalHeight()
@@ -572,6 +590,19 @@ func abWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 			barLeft := (winW - barW) / 2
 			localX := x - barLeft - borderW
 			if localX >= 0 {
+				// Check if click is on the minimize button (right end of bar).
+				minBtnStart := (len(abSlots) + 1) * abSlotW
+				if localX >= minBtnStart && localX < minBtnStart+abMinBtnW {
+					abMinimized = true
+					abSelectedSlot = -1
+					abSelectedSessID = ""
+					abInputText = ""
+					abInputActive = false
+					abResizeWindow()
+					invalidateRectProc.Call(abHwnd, 0, 1)
+					return 0
+				}
+
 				slotIdx := localX / abSlotW
 				if slotIdx == len(abSlots) {
 					// "+" button clicked — launch new session.
@@ -670,6 +701,11 @@ func abWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 }
 
 func abPaint(hdc uintptr) {
+	if abMinimized {
+		abPaintMinimized(hdc)
+		return
+	}
+
 	winW := int32(abWindowWidth())
 	barW := int32(abBarWidth())
 	totalH := int32(abTotalHeight())
@@ -822,6 +858,68 @@ func abPaint(hdc uintptr) {
 		selectObjectProc.Call(hdc, oldPlusFont)
 		deleteObjectProc.Call(plusFont)
 	}
+
+	// Minimize "—" button at the right end of the bar.
+	{
+		minX := barLeft + int32(borderW+(len(abSlots)+1)*abSlotW)
+		slotTop := barTop + borderW + 1
+
+		// Separator before minimize button.
+		drawLine(hdc, minX, slotTop, minX, barBottom-borderW, colorBorderShadow)
+
+		// Draw "—" text centered in the button.
+		minSize := int32(-18)
+		minFont, _, _ := createFontW.Call(
+			uintptr(minSize),
+			0, 0, 0,
+			0, 0, 0, 0,
+			DEFAULT_CHARSET, 0, 0, 0, 0,
+			uintptr(unsafe.Pointer(fontName)),
+		)
+		oldMinFont, _, _ := selectObjectProc.Call(hdc, minFont)
+		setTextColorProc.Call(hdc, colorTextDim)
+
+		minStr, _ := syscall.UTF16PtrFromString("\u2014") // em dash
+		minRC := RECT{minX, slotTop, minX + int32(abMinBtnW), barBottom - borderW}
+		drawTextProc.Call(hdc, uintptr(unsafe.Pointer(minStr)), ^uintptr(0), uintptr(unsafe.Pointer(&minRC)), DT_CENTER|DT_VCENTER|DT_SINGLELINE)
+		selectObjectProc.Call(hdc, oldMinFont)
+		deleteObjectProc.Call(minFont)
+	}
+}
+
+// abPaintMinimized renders the collapsed pill indicator.
+func abPaintMinimized(hdc uintptr) {
+	w := int32(abMinPillW)
+	h := int32(abMinPillH)
+
+	// Dark background.
+	fillRect(hdc, RECT{0, 0, w, h}, colorBgDark)
+
+	// Gold border around the pill.
+	fillRect(hdc, RECT{0, 0, w, 1}, colorBorderGold)         // top
+	fillRect(hdc, RECT{0, h - 1, w, h}, colorBorderGold)     // bottom
+	fillRect(hdc, RECT{0, 0, 1, h}, colorBorderGold)         // left
+	fillRect(hdc, RECT{w - 1, 0, w, h}, colorBorderGold)     // right
+
+	// Draw "^" chevron centered.
+	setBkModeProc.Call(hdc, TRANSPARENT)
+	fontName, _ := syscall.UTF16PtrFromString("Segoe UI")
+	chevSize := int32(-14)
+	chevFont, _, _ := createFontW.Call(
+		uintptr(chevSize),
+		0, 0, 0,
+		FW_BOLD, 0, 0, 0,
+		DEFAULT_CHARSET, 0, 0, 0, 0,
+		uintptr(unsafe.Pointer(fontName)),
+	)
+	oldFont, _, _ := selectObjectProc.Call(hdc, chevFont)
+	setTextColorProc.Call(hdc, colorTextGold)
+
+	chevStr, _ := syscall.UTF16PtrFromString("\u25B2") // ▲ upward triangle
+	chevRC := RECT{0, 0, w, h}
+	drawTextProc.Call(hdc, uintptr(unsafe.Pointer(chevStr)), ^uintptr(0), uintptr(unsafe.Pointer(&chevRC)), DT_CENTER|DT_VCENTER|DT_SINGLELINE)
+	selectObjectProc.Call(hdc, oldFont)
+	deleteObjectProc.Call(chevFont)
 }
 
 // abPaintOptions renders the options panel above the bar.
