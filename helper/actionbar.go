@@ -372,7 +372,7 @@ func abLaunchNewSession() {
 	go func() {
 		verb, _ := syscall.UTF16PtrFromString("open")
 		exe, _ := syscall.UTF16PtrFromString("wt.exe")
-		params, _ := syscall.UTF16PtrFromString("new-tab wsl.exe -- claude")
+		params, _ := syscall.UTF16PtrFromString(`new-tab wsl.exe -- bash -lc "cd ~/workspaces && claude"`)
 		shellExecuteW.Call(0, uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(exe)), uintptr(unsafe.Pointer(params)), 0, 1)
 	}()
 }
