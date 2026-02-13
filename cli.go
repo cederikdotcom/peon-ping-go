@@ -197,6 +197,14 @@ func runCLI(peonDir string, args []string) {
 		uninstallStartupShortcut()
 		os.Exit(0)
 
+	case "--install-opencode":
+		installOpenCode()
+		os.Exit(0)
+
+	case "--uninstall-opencode":
+		uninstallOpenCode()
+		os.Exit(0)
+
 	case "--help", "-h":
 		fmt.Print(`Usage: peon <command>
 
@@ -209,6 +217,8 @@ Commands:
   --actionbar          Launch the persistent action bar
   --install-startup    Add action bar to Windows startup
   --uninstall-startup  Remove action bar from Windows startup
+  --install-opencode   Install bridge plugin for OpenCode
+  --uninstall-opencode Remove OpenCode bridge plugin
   --packs              List available sound packs
   --pack <name>        Switch to a specific pack
   --pack               Cycle to the next pack

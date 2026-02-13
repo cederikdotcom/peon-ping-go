@@ -13,6 +13,7 @@ type genericPayload struct {
 	CWD       string `json:"cwd"`
 	SessionID string `json:"session_id"`
 	AgentMode bool   `json:"agent_mode"`
+	Message   string `json:"message"`
 }
 
 // GenericAdapter handles the internal event format sent directly.
@@ -28,6 +29,7 @@ func (GenericAdapter) Parse(raw json.RawMessage) (Event, error) {
 		CWD:       p.CWD,
 		SessionID: p.SessionID,
 		AgentMode: p.AgentMode,
+		Message:   p.Message,
 	}, nil
 }
 
