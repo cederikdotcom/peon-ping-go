@@ -43,3 +43,13 @@ func toWindowsPath(p string) string { return p }
 
 // detach is a no-op on macOS.
 func detach(args ...string) {}
+
+// installStartupShortcut is a no-op on macOS (action bar is Windows-only).
+func installStartupShortcut(peonDir string) {
+	fmt.Println("peon-ping: startup install not supported on macOS")
+}
+
+// uninstallStartupShortcut is a no-op on macOS.
+func uninstallStartupShortcut() {
+	fmt.Println("peon-ping: startup install not supported on macOS")
+}

@@ -146,3 +146,62 @@ func toWindowsPath(linuxPath string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// startupVBSPath returns the WSL path to the peon-ping.vbs startup script.
+func startupVBSPath() string {
+	// Get the Windows Startup folder via cmd.exe.
+	out, err := exec.Command("cmd.exe", "/c", "echo", "%APPDATA%").Output()
+	if err != nil {
+		return ""
+	}
+	appdata := strings.TrimSpace(string(out))
+	winPath := appdata + `\Microsoft\Windows\Start Menu\Programs\Startup\peon-ping.vbs`
+	// Convert to WSL path for writing.
+	wslOut, err := exec.Command("wslpath", "-u", winPath).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(wslOut))
+}
+
+// installStartupShortcut creates a VBS script in the Windows Startup folder
+// that silently launches the action bar on login.
+func installStartupShortcut(peonDir string) {
+	helperWin := toWindowsPath(filepath.Join(peonDir, "peon-helper.exe"))
+	stateWin := toWindowsPath(actionBarPath(peonDir))
+
+	vbs := fmt.Sprintf(`Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run """%s"" actionbar ""%s""", 0, False
+`, helperWin, stateWin)
+
+	dest := startupVBSPath()
+	if dest == "" {
+		fmt.Fprintln(os.Stderr, "peon-ping: could not find Windows Startup folder")
+		os.Exit(1)
+	}
+
+	if err := os.WriteFile(dest, []byte(vbs), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "peon-ping: failed to write startup script: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("peon-ping: installed startup script at %s\n", toWindowsPath(dest))
+}
+
+// uninstallStartupShortcut removes the VBS startup script.
+func uninstallStartupShortcut() {
+	dest := startupVBSPath()
+	if dest == "" {
+		fmt.Fprintln(os.Stderr, "peon-ping: could not find Windows Startup folder")
+		os.Exit(1)
+	}
+	if err := os.Remove(dest); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("peon-ping: no startup script found")
+		} else {
+			fmt.Fprintf(os.Stderr, "peon-ping: failed to remove: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	fmt.Println("peon-ping: startup script removed")
+}

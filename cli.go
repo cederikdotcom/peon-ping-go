@@ -189,22 +189,32 @@ func runCLI(peonDir string, args []string) {
 		fmt.Printf("peon-ping: registered window %d for session %s\n", hwnd, sessionID)
 		os.Exit(0)
 
+	case "--install-startup":
+		installStartupShortcut(peonDir)
+		os.Exit(0)
+
+	case "--uninstall-startup":
+		uninstallStartupShortcut()
+		os.Exit(0)
+
 	case "--help", "-h":
 		fmt.Print(`Usage: peon <command>
 
 Commands:
-  --pause           Mute sounds
-  --resume          Unmute sounds
-  --toggle          Toggle mute on/off
-  --status          Check if paused or active
-  --dismiss         Close all hanging notification windows
-  --actionbar       Launch the persistent action bar
-  --packs           List available sound packs
-  --pack <name>     Switch to a specific pack
-  --pack            Cycle to the next pack
-  --register <sid>  Register terminal window for session
-  --version         Show version
-  --help            Show this help
+  --pause              Mute sounds
+  --resume             Unmute sounds
+  --toggle             Toggle mute on/off
+  --status             Check if paused or active
+  --dismiss            Close all hanging notification windows
+  --actionbar          Launch the persistent action bar
+  --install-startup    Add action bar to Windows startup
+  --uninstall-startup  Remove action bar from Windows startup
+  --packs              List available sound packs
+  --pack <name>        Switch to a specific pack
+  --pack               Cycle to the next pack
+  --register <sid>     Register terminal window for session
+  --version            Show version
+  --help               Show this help
 `)
 		os.Exit(0)
 
