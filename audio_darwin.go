@@ -53,3 +53,8 @@ func installStartupShortcut(peonDir string) {
 func uninstallStartupShortcut() {
 	fmt.Println("peon-ping: startup install not supported on macOS")
 }
+
+// relaunchFromSource is a no-op on macOS.
+func relaunchFromSource(peonDir string) {
+	fmt.Println("peon-ping: relaunch not supported on macOS")
+}

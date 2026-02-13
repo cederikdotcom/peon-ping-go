@@ -138,6 +138,49 @@ func findHelper() string {
 	return dst
 }
 
+// relaunchFromSource rebuilds peon + helper from the source repo, installs
+// them to the hooks directory, and restarts the action bar.
+func relaunchFromSource(peonDir string) {
+	// Find the source repo (same dir as the running binary's source, or fallback).
+	srcDir := os.Getenv("PEON_SRC")
+	if srcDir == "" {
+		home, _ := os.UserHomeDir()
+		srcDir = filepath.Join(home, "workspaces", "peon-ping-go")
+	}
+	goPath := "/usr/local/go/bin/go"
+
+	fmt.Printf("peon-ping: building from %s ...\n", srcDir)
+
+	// Build Linux binary.
+	cmd := exec.Command(goPath, "build", "-o", filepath.Join(peonDir, "peon"), ".")
+	cmd.Dir = srcDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "peon-ping: build peon failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Build Windows helper.
+	cmd = exec.Command(goPath, "build", "-ldflags", "-H windowsgui", "-o", filepath.Join(peonDir, "peon-helper.exe"), "./helper/")
+	cmd.Dir = srcDir
+	cmd.Env = append(os.Environ(), "GOOS=windows", "GOARCH=amd64")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "peon-ping: build helper failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("peon-ping: installed to", peonDir)
+
+	// Restart action bar (the new helper kills the old one).
+	cachedHelperPath = "" // clear cached path so findHelper picks up new binary
+	abFile := toWindowsPath(actionBarPath(peonDir))
+	detach("actionbar", abFile)
+	fmt.Println("peon-ping: action bar restarted")
+}
+
 // toWindowsPath converts a WSL path to a Windows path via wslpath.
 func toWindowsPath(linuxPath string) string {
 	out, err := exec.Command("wslpath", "-w", linuxPath).Output()

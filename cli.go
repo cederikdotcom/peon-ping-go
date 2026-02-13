@@ -189,6 +189,10 @@ func runCLI(peonDir string, args []string) {
 		fmt.Printf("peon-ping: registered window %d for session %s\n", hwnd, sessionID)
 		os.Exit(0)
 
+	case "--relaunch":
+		relaunchFromSource(peonDir)
+		os.Exit(0)
+
 	case "--install-startup":
 		installStartupShortcut(peonDir)
 		os.Exit(0)
@@ -215,6 +219,7 @@ Commands:
   --status             Check if paused or active
   --dismiss            Close all hanging notification windows
   --actionbar          Launch the persistent action bar
+  --relaunch           Rebuild from source, install, restart action bar
   --install-startup    Add action bar to Windows startup
   --uninstall-startup  Remove action bar from Windows startup
   --install-opencode   Install bridge plugin for OpenCode
